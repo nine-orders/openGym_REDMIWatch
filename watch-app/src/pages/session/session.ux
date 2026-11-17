@@ -1,0 +1,409 @@
+<template>
+  <div class="pg">
+    <text class="loading" if="{{ !ready }}">载入中…</text>
+
+    <div class="col" if="{{ ready && err }}">
+      <text class="err">{{ err }}</text>
+      <text class="btn-sec" onclick="goHome">返回主页</text>
+    </div>
+
+    <!-- ============ 训练界面 ============ -->
+    <div class="col" if="{{ ready && !err && phase === 'train' }}">
+      <div class="top">
+        <text class="prog">{{ prog }}</text>
+        <text class="clock">{{ elapsed }}</text>
+      </div>
+      <text class="exname">{{ curName }}</text>
+      <text class="dots">{{ dots }}</text>
+
+      <text class="lab">重量 {{ unit }}</text>
+      <div class="steprow">
+        <text class="step" onclick="wStep(-25)">-2.5</text>
+        <text class="step" onclick="wStep(-5)">-.5</text>
+        <text class="bigv" if="{{ dispW > 0 }}">{{ dispW }}</text>
+        <text class="bigv" if="{{ dispW <= 0 }}">自重</text>
+        <text class="step" onclick="wStep(5)">+.5</text>
+        <text class="step" onclick="wStep(25)">+2.5</text>
+      </div>
+
+      <text class="lab">{{ modeSec ? '秒数' : '次数' }}</text>
+      <div class="steprow">
+        <text class="step wide" onclick="rStep(-1)">-1</text>
+        <text class="bigv">{{ dispR }}</text>
+        <text class="step wide" onclick="rStep(1)">+1</text>
+      </div>
+
+      <text class="btn-main" onclick="doneTap">完成本组</text>
+      <div class="row2">
+        <text class="btn-sec" onclick="prevEx">上一动作</text>
+        <text class="btn-sec" onclick="nextEx">下一动作</text>
+      </div>
+      <text class="link-end" onclick="endTap">结束训练</text>
+    </div>
+
+    <!-- ============ 休息界面 ============ -->
+    <div class="col" if="{{ ready && !err && phase === 'rest' }}">
+      <text class="rest-lab">休息中</text>
+      <text class="rest-t">{{ restTxt }}</text>
+      <div class="bar">
+        <div class="bar-in" style="width: {{ restBar }}%"></div>
+      </div>
+      <text class="next">下一组</text>
+      <text class="next-v">{{ nextName }}</text>
+      <text class="next-s">{{ nextSetTxt }}</text>
+      <div class="row2">
+        <text class="btn-sec" onclick="restAdd">+30 秒</text>
+        <text class="btn-sec" onclick="restSkip">跳过休息</text>
+      </div>
+      <text class="link-end" onclick="endTap">结束训练</text>
+    </div>
+
+    <!-- ============ 总结界面 ============ -->
+    <div class="col" if="{{ ready && !err && phase === 'summary' }}">
+      <text class="sum-title">训练完成</text>
+      <text class="sum-big">{{ sumSets }} 组 · {{ sumVol }} {{ unit }}</text>
+      <text class="sum-min">用时约 {{ sumMin }} 分钟</text>
+      <scroll class="sum-list">
+        <text class="sum-line" for="{{ (i, ln) in sumList }}">{{ ln }}</text>
+      </scroll>
+      <text class="btn-main" if="{{ saveState !== 1 }}" onclick="saveTap">{{ busy ? '同步中…' : (saveState === 2 ? '重试同步' : '保存并同步') }}</text>
+      <text class="ok" if="{{ saveState === 1 }}">已同步到 openGym ✓</text>
+      <text class="warn" if="{{ saveState === 2 && syncMsg }}">未同步：{{ syncMsg }}</text>
+      <div class="row2">
+        <text class="btn-sec" onclick="goHome">返回</text>
+        <text class="btn-sec danger" if="{{ saveState !== 1 }}" onclick="quitTap">{{ confirmQuit ? '再点一次确认丢弃' : '丢弃本次' }}</text>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+import router from '@system.router'
+import { getJSON, setJSON, buzz } from '../../js/store'
+import { buildSession, totals, toWorkout, queueOrPush, heartbeat, heartbeatEnd } from '../../js/session'
+
+const pad = n => (n < 10 ? '0' + n : '' + n)
+const fmtW = n => Math.round((Number(n) || 0) * 10) / 10
+
+export default {
+  data: {
+    timer: null,
+    ready: false,
+    err: '',
+    phase: 'train',
+    s: null,
+    unit: 'kg',
+    exI: 0,
+    setI: 0,
+    modeSec: false,
+    curName: '',
+    dots: '',
+    prog: '',
+    elapsed: '0:00',
+    dispW: 0,
+    dispR: 0,
+    restTxt: '0:00',
+    restBar: 0,
+    restEndAt: 0,
+    restTotal: 90,
+    nextName: '',
+    nextSetTxt: '',
+    sumSets: 0,
+    sumVol: 0,
+    sumMin: 0,
+    sumList: [],
+    busy: false,
+    saveState: 0,
+    syncMsg: '',
+    confirmQuit: false
+  },
+
+  async onInit() {
+    let s = await getJSON('active', null)
+    if (!(s && s.entries && s.entries.length)) {
+      // index「开始训练」经路由参数传今天该练的；「选动作单」页落到 startRid。
+      // startRid 由 pick 页 setJSON 写入，这里必须用 getJSON 读（v1 用 sGet 读到
+      // 带引号的 JSON 串，粘性值从未匹配上过）。
+      const rid = this.rid || (await getJSON('startRid', ''))
+      const plan = await getJSON('plan', null)
+      if (!plan || !plan.routines || !plan.routines.length) {
+        this.err = '无可用计划：请先在网页端添加动作单，再到手表配对拉取'
+        this.ready = true
+        return
+      }
+      s = buildSession(plan, rid)
+      if (!s || !s.entries.length) {
+        this.err = '动作单里没有动作'
+        this.ready = true
+        return
+      }
+      await setJSON('active', s)
+    }
+    this.s = s
+    this.unit = s.unit || 'kg'
+    const pos = this.firstUndoneAfter(-1, -1)
+    if (pos) { this.exI = pos[0]; this.setI = pos[1] }
+    this.refresh()
+    this.ready = true
+  },
+
+  onShow() {
+    if (this.timer) return
+    this.timer = setInterval(() => this.tick(), 1000)
+  },
+  onHide() { this.stopTick() },
+  onDestroy() { this.stopTick() },
+  stopTick() {
+    if (this.timer) { clearInterval(this.timer); this.timer = null }
+  },
+
+  // ---------- 查找未完成组 ----------
+  // (exI, setI) 之后的第一个未完成组；onInit 用 (-1,-1) 表示"从头找"，
+  // 所以 exI<0 时跳过本动作内循环，下一动作从 0 起步。
+  firstUndoneAfter(exI, setI) {
+    const ens = this.s.entries
+    if (exI >= 0) {
+      for (let j = setI + 1; j < ens[exI].sets.length; j++) {
+        if (!ens[exI].sets[j].done) return [exI, j]
+      }
+    }
+    for (let i = Math.max(0, exI + 1); i < ens.length; i++) {
+      for (let j = 0; j < ens[i].sets.length; j++) {
+        if (!ens[i].sets[j].done) return [i, j]
+      }
+    }
+    return null
+  },
+
+  // ---------- 刷新展示 ----------
+  refresh() {
+    const s = this.s
+    if (!s) return
+    const en = s.entries[this.exI]
+    const set = en.sets[this.setI]
+    this.modeSec = en.mode === 'sec'
+    this.curName = en.name
+    // 展示值默认沿用本动作上一组实际完成的重量/次数，没有则用本组计划值
+    let pw = set.w, pr = set.r
+    for (let j = this.setI - 1; j >= 0; j--) {
+      if (en.sets[j].done) { pw = en.sets[j].w; pr = en.sets[j].r; break }
+    }
+    this.dispW = fmtW(pw)
+    this.dispR = Math.round(pr)
+    this.dots = en.sets.map((x, j) => x.done ? '●' : (j === this.setI ? '◐' : '○')).join(' ')
+    const t = totals(s)
+    this.prog = (this.exI + 1) + '/' + s.entries.length + ' 动作 · ' + t.done + '/' + t.total + ' 组'
+    this.elapsed = this.fmtClock(Date.now() - s.start)
+    this.nextName = en.name
+    this.nextSetTxt = set.w > 0
+      ? (fmtW(set.w) + ' ' + this.unit + ' × ' + set.r)
+      : ('自重 × ' + set.r + (this.modeSec ? ' 秒' : ' 次'))
+  },
+
+  tick() {
+    if (!this.s) return
+    this.elapsed = this.fmtClock(Date.now() - this.s.start)
+    if (this.phase === 'rest') this.tickRest()
+  },
+  tickRest() {
+    const left = Math.max(0, this.restEndAt - Date.now())
+    const sec = Math.ceil(left / 1000)
+    this.restTxt = pad(Math.floor(sec / 60)) + ':' + pad(sec % 60)
+    this.restBar = Math.round(100 * (1 - left / (this.restTotal * 1000)))
+    if (left <= 0) {
+      buzz('long')
+      this.phase = 'train'
+      this.refresh()
+    }
+  },
+  fmtClock(ms) {
+    const s = Math.floor(ms / 1000)
+    const m = Math.floor(s / 60)
+    const h = Math.floor(m / 60)
+    return h > 0 ? (h + ':' + pad(m % 60) + ':' + pad(s % 60)) : (m + ':' + pad(s % 60))
+  },
+
+  // ---------- 调节 ----------
+  wStep(d10) {
+    this.dispW = fmtW(Math.max(0, this.dispW + d10 / 10))
+    buzz('short')
+  },
+  rStep(d) {
+    const min = this.modeSec ? 5 : 1
+    this.dispR = Math.max(min, Math.round(this.dispR + d))
+    buzz('short')
+  },
+
+  // ---------- 完成一组 ----------
+  doneTap() {
+    if (!this.s || this.busy) return
+    const en = this.s.entries[this.exI]
+    const set = en.sets[this.setI]
+    if (!set.done) {
+      set.w = Math.max(0, fmtW(this.dispW))
+      set.r = Math.max(1, Math.round(this.dispR))
+      set.done = true
+      set.ts = Date.now()
+      setJSON('active', this.s)
+      buzz('short')
+      const t = totals(this.s)
+      heartbeat(this.s, t.done, t.total, this.exI)
+    }
+    this.advance()
+  },
+  advance() {
+    const pos = this.firstUndoneAfter(this.exI, this.setI)
+    if (!pos) { this.enterSummary(); return }
+    this.exI = pos[0]
+    this.setI = pos[1]
+    this.phase = 'rest'
+    this.restTotal = this.s.entries[this.exI].rs || this.s.restSec || 90
+    this.restEndAt = Date.now() + this.restTotal * 1000
+    this.tickRest()
+    this.refresh()
+  },
+
+  // ---------- 动作切换 / 休息控制 ----------
+  navEx(d) {
+    const last = this.s.entries.length - 1
+    this.exI = Math.min(last, Math.max(0, this.exI + d))
+    let j = 0
+    const sets = this.s.entries[this.exI].sets
+    for (let k = 0; k < sets.length; k++) { if (!sets[k].done) { j = k; break } }
+    this.setI = j
+    this.phase = 'train'
+    this.refresh()
+  },
+  prevEx() { this.navEx(-1) },
+  nextEx() { this.navEx(1) },
+  restAdd() {
+    this.restEndAt += 30000
+    this.restTotal += 30
+    this.tickRest()
+  },
+  restSkip() {
+    this.phase = 'train'
+    this.refresh()
+  },
+
+  // ---------- 结束 / 保存 ----------
+  endTap() { this.enterSummary() },
+  enterSummary() {
+    const s = this.s
+    const t = totals(s)
+    this.sumSets = t.done
+    this.sumVol = t.vol
+    this.sumMin = Math.max(1, Math.round((Date.now() - s.start) / 60000))
+    this.sumList = s.entries
+      .filter(en => en.sets.some(x => x.done))
+      .map(en => {
+        const done = en.sets.filter(x => x.done)
+        const top = done.reduce((a, b) => (b.w || 0) > (a.w || 0) ? b : a, done[0])
+        const load = top.w > 0 ? fmtW(top.w) + '×' : ''
+        return en.name + '  ' + load + top.r + (en.mode === 'sec' ? '秒' : '次') + ' ×' + done.length + '组'
+      })
+    this.phase = 'summary'
+    this.saveState = 0
+    this.syncMsg = ''
+    setJSON('active', s)
+  },
+  async saveTap() {
+    if (this.busy || !this.s) return
+    this.busy = true
+    try {
+      const w = toWorkout(this.s)
+      const res = await queueOrPush(w)
+      heartbeatEnd()
+      await setJSON('active', null)
+      this.saveState = res.synced ? 1 : 2
+      this.syncMsg = res.error || ''
+      if (res.synced) buzz('long')
+    } catch (e) {
+      this.saveState = 2
+      this.syncMsg = e.message
+    }
+    this.busy = false
+  },
+  quitTap() {
+    if (this.confirmQuit) {
+      setJSON('active', null)
+      this.goHome()
+      return
+    }
+    this.confirmQuit = true
+    const self = this
+    setTimeout(() => { self.confirmQuit = false }, 3000)
+  },
+  goHome() {
+    try { router.replace({ uri: '/pages/index' }) } catch (e) { router.back() }
+  }
+}
+</script>
+
+<style>
+/* 曜黑极简 OLED Mono 换肤（2026-11）：纯黑底 + 单一酸性绿强调（与 v2 session2 同 token）。
+ * token：底 #000000 · 容器 #101013 · 次级钮/轨道 #19191E · 强调 #C9F73A · 强调上墨色 #0A0A0A
+ *        主文字 #F5F5F7 · 次级 #9A9AA2 · 弱化 #62626A · 成功 #35D07F；琥珀/红为语义色不动。
+ * Vela 引擎 div 默认主轴是 row，纵向排列必须显式声明；条件包裹层也走 .col */
+.pg {
+  position: absolute; width: 432px; height: 514px;
+  background-color: #000000; padding: 26px 22px;
+  flex-direction: column;
+}
+.col { flex-direction: column; }
+.loading { font-size: 24px; color: #9A9AA2; margin-top: 200px; }
+.err { font-size: 24px; color: #f85149; margin-top: 150px; margin-bottom: 30px; }
+
+.top { flex-direction: row; justify-content: space-between; }
+.prog { font-size: 19px; color: #9A9AA2; }
+.clock { font-size: 19px; color: #9A9AA2; }
+.exname {
+  font-size: 34px; color: #F5F5F7; font-weight: bold;
+  margin-top: 10px; lines: 2; text-overflow: ellipsis;
+}
+.dots { font-size: 24px; color: #C9F73A; margin-top: 6px; margin-bottom: 10px; }
+
+.lab { font-size: 19px; color: #9A9AA2; margin: 6px 0 6px 0; }
+.steprow {
+  flex-direction: row; align-items: center; justify-content: space-between;
+  background-color: #101013; border-radius: 16px; padding: 10px 8px;
+}
+.step {
+  width: 74px; height: 62px; line-height: 62px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 12px; font-size: 22px;
+}
+.wide { width: 108px; }
+.bigv { font-size: 46px; color: #ffffff; font-weight: bold; }
+
+.btn-main {
+  height: 82px; line-height: 82px; text-align: center;
+  background-color: #C9F73A; color: #0A0A0A; border-radius: 20px;
+  font-size: 30px; font-weight: bold; margin-top: 14px; margin-bottom: 10px;
+}
+.row2 { flex-direction: row; justify-content: space-between; }
+.btn-sec {
+  width: 186px; height: 64px; line-height: 64px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 16px; font-size: 22px;
+}
+.danger { color: #f85149; }
+.link-end { font-size: 20px; color: #62626A; text-align: center; margin-top: 10px; }
+
+.rest-lab { font-size: 22px; color: #9A9AA2; margin-top: 30px; text-align: center; }
+.rest-t { font-size: 84px; color: #C9F73A; font-weight: bold; text-align: center; margin-top: 8px; }
+.bar {
+  height: 14px; background-color: #19191E; border-radius: 7px;
+  margin: 14px 10px 20px 10px;
+}
+.bar-in { height: 14px; background-color: #C9F73A; border-radius: 7px; }
+.next { font-size: 19px; color: #9A9AA2; text-align: center; }
+.next-v { font-size: 28px; color: #F5F5F7; font-weight: bold; text-align: center; margin-top: 4px; }
+.next-s { font-size: 24px; color: #C9F73A; text-align: center; margin-top: 2px; margin-bottom: 26px; }
+
+.sum-title { font-size: 34px; color: #F5F5F7; font-weight: bold; margin-top: 10px; }
+.sum-big { font-size: 30px; color: #C9F73A; font-weight: bold; margin-top: 8px; }
+.sum-min { font-size: 20px; color: #9A9AA2; margin-top: 4px; }
+.sum-list { height: 118px; margin-top: 10px; flex-direction: column; }
+.sum-line { font-size: 20px; color: #F5F5F7; margin-bottom: 6px; }
+.ok { font-size: 22px; color: #35D07F; text-align: center; margin-top: 8px; }
+.warn { font-size: 18px; color: #d29922; margin-top: 6px; }
+</style>

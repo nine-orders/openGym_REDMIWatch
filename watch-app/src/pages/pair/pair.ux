@@ -1,0 +1,302 @@
+<template>
+  <div class="pg">
+    <div class="trow">
+      <text class="title">配对设置</text>
+      <text class="link" onclick="spikeTap">传输诊断→</text>
+    </div>
+
+    <div class="tabs">
+      <text class="tab {{ tab === 'host' ? 'tabOn' : '' }}" onclick="setTab('host')">服务器</text>
+      <text class="tab {{ tab === 'code' ? 'tabOn' : '' }}" onclick="setTab('code')">配对码</text>
+      <text class="key2" onclick="tapBack">删除</text>
+      <text class="key2" onclick="tapClear">清空</text>
+    </div>
+
+    <div class="field">
+      <text class="val" if="{{ tab === 'host' }}">{{ (host === 'interconnect' ? '自动配对（系统通道）' : host) || (pairMode === 'direct' ? '电脑IP，如 192.168.1.10' : '手机IP，如 192.168.1.10') }}</text>
+      <text class="val" if="{{ tab === 'code' }}">{{ code || (pairMode === 'direct' ? '8位配对码(A-Z/2-9)' : '8位数字token') }}</text>
+    </div>
+
+    <div class="grid">
+      <div class="grow" for="{{ (ri, row) in rows }}">
+        <text class="key {{ isWideCode ? 'nkey' : '' }}" for="{{ (ci, ch) in row }}" onclick="tapChar(ri, ci)">{{ ch }}</text>
+      </div>
+    </div>
+
+    <text class="btn-main" onclick="pairTap">{{ busy ? '配对中…' : (pairMode === 'direct' ? '配对并拉取计划' : '配对并拉取快照') }}</text>
+    <text class="msg {{ msg.indexOf('失败') === 0 ? 'merr' : '' }}" if="{{ msg }}">{{ msg }}</text>
+    <!-- 提示与结果消息互斥显示：键盘 + 结果都要留在 514 高度内（S6 修溢出，S7 再收紧） -->
+    <text class="hint" if="{{ !msg }}">{{ hint }}</text>
+  </div>
+</template>
+
+<script>
+// v2 配对（S4）+ hub 开关（S7，按 plan.md S3/S6 遗留与 s7-real-device 发现）：
+//   「模式」切换 手机 hub / 直连服务器，选择持久化在 pairMode（'hub'|'direct'）。
+//   手机 hub：host = 手机 IP（无端口默认 :8765），配对码 = hub 首启生成、通知栏展示的
+//     8 位数字 token（docs/watch-v2/s3-android-hub.md 契约）；成功自动回主页。
+//   直连服务器（v1 fallback）：host = 电脑 IP（无端口默认 :8080），配对码 = 网页端
+//     「设置 → 配对手机应用」的 8 位码（api.js redeem，5 分钟有效）；成功拉档案建计划缓存。
+//   模式未显式选过时按既有凭证自动判定（hub 凭证齐 → hub；v1 凭证齐 → 直连；都没有
+//   → 默认 hub，v2 主路径）——与 index.ux 的判定规则一致。
+import router from '@system.router'
+import { sGet, sSet, setJSON, buzz } from '../../js/store'
+import { ping, syncSnapshot } from '../../js/hub'
+import { redeem, getData } from '../../js/api'
+import { IC_HOST, probeIc } from '../../js/ic'
+import { buildPlanCache } from '../../js/session'
+
+const HOST_CHARS = '1234567890.:'
+const CODE_CHARS = '0123456789'
+const DIRECT_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+export default {
+  data: {
+    tab: 'host',
+    pairMode: 'hub',
+    host: '',
+    code: '',
+    rows: [],
+    msg: '',
+    hint: '',
+    isWideCode: false,
+    busy: false
+  },
+  async onShow() {
+    // 模式解析：显式选择优先；否则按凭证自动判定；两者皆无默认 hub（v2 主路径）
+    let pm = await sGet('pairMode', '')
+    if (pm !== 'hub' && pm !== 'direct') {
+      const hh = await sGet('hubHost', '')
+      const ht = await sGet('hubToken', '')
+      const h = await sGet('host', '')
+      const t = await sGet('token', '')
+      pm = (hh && ht) ? 'hub' : ((h && t) ? 'direct' : 'hub')
+    }
+    this.pairMode = pm
+    this.host = pm === 'hub'
+      ? (await sGet('hubHost', '') || await sGet('host', ''))
+      : (await sGet('host', '') || await sGet('hubHost', ''))
+    if (this.host.indexOf('http://') === 0) this.host = this.host.slice(7)
+    this.rebuild()
+    // S8 2A：免输入系统配对探测（不阻塞输入；成功才接管）
+    this._probeIc()
+  },
+  // 系统通道探测 + 免输入配对：诊断 OK 且无既有 hub 凭证时自动完成原来手点的配对；
+  // 失败给出明确状态文案（手机未安装 / 通道不可用），绝不静默卡住——手动配对照常可用。
+  async _probeIc() {
+    const pm = this.pairMode
+    const hh = await sGet('hubHost', '')
+    const ht = await sGet('hubToken', '')
+    try {
+      const st = await probeIc()
+      if (st.status === 0) {
+        if (pm === 'direct' || (hh && ht)) return   // 用户选了直连 / 已配对过：不打扰
+        await sSet('hubHost', IC_HOST)
+        await sSet('hubToken', IC_HOST)
+        this.msg = '系统通道已连接，正在确认手机 hub…'
+        try {
+          await ping()
+          const snap = await syncSnapshot()
+          const r = snap.state && snap.state.ready
+          const n = r ? ((r.today ? 1 : 0) + (r.others ? r.others.length : 0)) : 0
+          this.msg = '配对成功 ✓（免输入）可开始 ' + n + ' 场'
+          buzz('long')
+          setTimeout(() => router.back(), 1200)
+        } catch (e) {
+          await sSet('hubHost', '')
+          await sSet('hubToken', '')
+          this.msg = '系统通道已连但 hub 无响应：' + e.message + '（可用 IP+token 手动配对）'
+        }
+        return
+      }
+      if (pm === 'direct' || (hh && ht) || this.msg) return
+      this.msg = st.status === 1001
+        ? '手机未安装 openGym：请先安装手机 App（或用下方 IP+token 手动配对）'
+        : '系统配对不可用（' + st.status + '）：用下方 IP+token 手动配对'
+    } catch (e) {
+      if (pm === 'direct' || (hh && ht) || this.msg) return
+      this.msg = '系统配对探测失败：' + e.message + '（可手动配对）'
+    }
+  },
+  rebuild() {
+    const isHub = this.pairMode !== 'direct'
+    if (this.tab === 'host') {
+      this.rows = splitRows(HOST_CHARS, 6)
+      this.isWideCode = false
+    } else if (isHub) {
+      this.rows = splitRows(CODE_CHARS, 6)
+      this.isWideCode = false
+    } else {
+      // v1 配对码 32 个字符按 8 个一行：4 行窄键（514 高度约束）
+      this.rows = splitRows(DIRECT_CODE_CHARS, 8)
+      this.isWideCode = true
+    }
+    this.hint = isHub
+      ? '流程：手机 openGym 通知栏查看「IP · token」，服务器页填 IP（默认端口 8765），配对码页填 8 位数字。'
+      : '流程：电脑 openGym → 设置 → 配对手机应用 → 8 位码（5 分钟有效），服务器页填电脑 IP（默认端口 8080），配对码页填 8 位码。'
+  },
+  setTab(t) {
+    this.tab = t
+    this.rebuild()
+    buzz('short')
+  },
+  async modeTap() {
+    // hub/直连切换：持久化选择 + 明确状态提示；清空配对码输入避免串模式
+    const next = this.pairMode === 'direct' ? 'hub' : 'direct'
+    this.pairMode = next
+    await sSet('pairMode', next)
+    this.code = ''
+    this.msg = next === 'direct'
+      ? '已切到「直连服务器」模式：对电脑 openGym 配对'
+      : '已切到「手机 hub」模式（推荐）：对手机 openGym 配对'
+    buzz('short')
+    this.rebuild()
+  },
+  tapChar(ri, ci) {
+    const ch = (this.rows[ri] || [])[ci]
+    if (!ch) return
+    this.msg = ''
+    if (this.tab === 'host') this.host = (this.host + ch).slice(0, 21)
+    else this.code = (this.code + ch).slice(0, 8)
+    buzz('short')
+  },
+  tapBack() {
+    if (this.tab === 'host') this.host = this.host.slice(0, -1)
+    else this.code = this.code.slice(0, -1)
+    buzz('short')
+  },
+  tapClear() {
+    if (this.tab === 'host') this.host = ''
+    else this.code = ''
+    buzz('short')
+  },
+  async pairTap() {
+    if (this.busy) return
+    const isHub = this.pairMode !== 'direct'
+    const host = (this.host || '').trim()
+    const code = (this.code || '').trim()
+    if (!host) {
+      this.msg = isHub ? '先在「服务器」页输入手机的局域网 IP' : '先在「服务器」页输入电脑的局域网 IP'
+      return
+    }
+    if (isHub) {
+      if (!/^\d{8}$/.test(code)) {
+        this.msg = 'token 是 8 位数字（手机通知栏查看），当前「' + (code || '空') + '」'
+        return
+      }
+      await sSet('hubHost', host)
+      await sSet('hubToken', code)
+      this.busy = true
+      const fullHost = host.indexOf(':') >= 0 ? host : host + ':8765'
+      this.msg = '正在连接 ' + fullHost + ' …'
+      try {
+        await ping()
+        const st = await syncSnapshot()
+        const r = st.state && st.state.ready
+        const n = r ? ((r.today ? 1 : 0) + (r.others ? r.others.length : 0)) : 0
+        this.msg = '配对成功 ✓ 可开始 ' + n + ' 场'
+        buzz('long')
+        // 成功即回主页（主页 onShow 会拉快照显示今日动作单）；失败留在本页改 token 重试
+        setTimeout(() => router.back(), 1200)
+      } catch (e) {
+        await sSet('hubToken', '')   // token 没验过就不算配对，避免 index 误入 hub 模式
+        this.msg = '失败：' + e.message
+      }
+      this.busy = false
+      return
+    }
+    // v1 直连（redeem）：host 先落库（api.call 读 host）、8 位码换 token、拉档案建计划缓存
+    const up = code.toUpperCase()
+    if (up.length !== 8) {
+      this.msg = '配对码是 8 位（A-Z 与 2-9），当前「' + (code || '空') + '」'
+      return
+    }
+    this.busy = true
+    const fullHost = host.indexOf(':') >= 0 ? host : host + ':8080'
+    this.msg = '正在连接 ' + fullHost + ' …'
+    try {
+      await sSet('host', fullHost)
+      const res = await redeem(up)
+      await sSet('token', res.token)
+      const data = await getData()
+      const plan = buildPlanCache((data && data.state) || {})
+      await setJSON('plan', plan)
+      this.msg = '直连配对成功 ✓ 拉到 ' + plan.routines.length + ' 个动作单'
+      buzz('long')
+      setTimeout(() => router.back(), 1200)
+    } catch (e) {
+      await sSet('token', '')   // 没验过的不算配对
+      this.msg = '失败：' + e.message
+    }
+    this.busy = false
+  },
+  spikeTap() {
+    router.push({ uri: '/pages/spike' })
+  }
+}
+
+function splitRows(chars, per) {
+  const rows = []
+  for (let i = 0; i < chars.length; i += per) {
+    rows.push(chars.slice(i, i + per).split(''))
+  }
+  return rows
+}
+</script>
+
+<style>
+/* 曜黑极简 OLED Mono 换肤（2026-11）：纯黑底 + 单一酸性绿强调。
+ * token：底 #000000 · 容器 #101013 · 次级钮/键 #19191E · 内嵌 #0A0A0E · 强调 #C9F73A · 强调上墨色 #0A0A0A
+ *        主文字 #F5F5F7 · 次级 #9A9AA2 · 弱化 #62626A · 成功 #35D07F；琥珀/红/蓝链接为语义色不动。
+ * S7 收紧布局（在 S6 压缩基础上再加模式开关行而不再溢出 514）：
+   宽度预算：trow（标题 24px + 模式钮 + 诊断链接）一行；tabs 吸收原来 grid 的删除/清空宽键；
+   直连配对码 4 行窄键（8/行，inline 宽度 42px）。页高按最大分支（直连：4 行窄键）算。 */
+.pg {
+  position: absolute; width: 432px; height: 514px;
+  background-color: #000000; padding: 14px 22px;
+  flex-direction: column;
+}
+.trow { flex-direction: row; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.title { font-size: 24px; color: #F5F5F7; font-weight: bold; }
+.mtoggle {
+  font-size: 18px; color: #d29922; background-color: #101013;
+  border-radius: 10px; padding: 2px 10px;
+}
+.link { font-size: 18px; color: #58a6ff; }
+.tabs { flex-direction: row; justify-content: flex-end; margin-bottom: 6px; }
+.tab {
+  width: 88px; height: 42px; line-height: 42px; text-align: center;
+  color: #9A9AA2; font-size: 20px; background-color: #101013;
+  border-radius: 12px; margin-right: 6px;
+}
+/* 快应用 CSS 不支持复合选择器，状态类须用独立类名（且写在基类之后） */
+.tabOn { background-color: #C9F73A; color: #0A0A0A; font-weight: bold; }
+.key2 {
+  width: 60px; height: 42px; line-height: 42px; text-align: center;
+  background-color: #19191E; color: #C9F73A; border-radius: 12px;
+  font-size: 18px; margin-left: 6px;
+}
+.field {
+  height: 48px; background-color: #0A0A0E; border-radius: 12px;
+  justify-content: center; padding: 0 16px; margin-bottom: 6px;
+  flex-direction: column;
+}
+.val { font-size: 24px; color: #F5F5F7; }
+.grid { margin-bottom: 6px; flex-direction: column; }
+.grow { flex-direction: row; margin-bottom: 4px; }
+.key {
+  width: 56px; height: 44px; line-height: 44px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 12px;
+  font-size: 22px; margin-right: 6px;
+}
+/* 直连配对码 8 键/行：inline 宽度（复合选择器不可用） */
+.nkey { width: 42px; font-size: 20px; }
+.btn-main {
+  height: 60px; line-height: 60px; text-align: center;
+  background-color: #C9F73A; color: #0A0A0A; border-radius: 18px;
+  font-size: 24px; font-weight: bold; margin-bottom: 4px;
+}
+.msg { font-size: 18px; color: #35D07F; margin-bottom: 2px; }
+.merr { color: #f85149; }
+.hint { font-size: 15px; color: #62626A; }
+</style>

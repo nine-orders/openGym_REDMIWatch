@@ -1,0 +1,72 @@
+<template>
+  <div class="pg">
+    <text class="title">选择动作单</text>
+    <div class="empty" if="{{ !routines.length }}">
+      <text class="c-s">本地无计划。请先在网页端 openGym 添加动作单，然后在「配对设置」里重新拉取。</text>
+    </div>
+    <scroll class="list" if="{{ routines.length }}">
+      <div class="item" for="{{ (ri, r) in routines }}" onclick="pick($idx)">
+        <text class="today" if="{{ r.id === todayRid }}">今日</text>
+        <text class="name">{{ r.name }}</text>
+        <text class="meta">{{ r.exN }} 个动作</text>
+      </div>
+    </scroll>
+    <text class="btn-sec" onclick="back">返回</text>
+  </div>
+</template>
+
+<script>
+import router from '@system.router'
+import { getJSON, setJSON } from '../../js/store'
+import { todayRoutineId } from '../../js/session'
+
+export default {
+  data: {
+    routines: [],
+    todayRid: ''
+  },
+  async onShow() {
+    const plan = await getJSON('plan', null)
+    this.routines = (plan && plan.routines ? plan.routines : []).map(r => ({
+      id: r.id, name: r.name, exN: (r.ex || []).length
+    }))
+    this.todayRid = plan ? todayRoutineId(plan) : ''
+  },
+  async pick(i) {
+    const r = this.routines[i]
+    if (!r) return
+    await setJSON('startRid', r.id)
+    router.push({ uri: '/pages/session' })
+  },
+  back() { router.back() }
+}
+</script>
+
+<style>
+/* 曜黑极简 OLED Mono 换肤（2026-11）：纯黑底 + 单一酸性绿强调。
+ * token：底 #000000 · 容器 #101013 · 次级钮 #19191E · 强调 #C9F73A
+ *        主文字 #F5F5F7 · 次级 #9A9AA2。 */
+.pg {
+  position: absolute; width: 432px; height: 514px;
+  background-color: #000000; padding: 30px 24px;
+  flex-direction: column;
+}
+.title { font-size: 32px; color: #F5F5F7; font-weight: bold; margin-bottom: 14px; }
+.empty { margin-top: 40px; flex-direction: column; }
+.c-s { font-size: 21px; color: #9A9AA2; }
+.list { height: 300px; }
+.item {
+  background-color: #101013; border-radius: 18px;
+  padding: 18px 20px; margin-bottom: 12px;
+  flex-direction: column;
+}
+.today {
+  font-size: 17px; color: #C9F73A; margin-bottom: 4px;
+}
+.name { font-size: 26px; color: #F5F5F7; font-weight: bold; }
+.meta { font-size: 19px; color: #9A9AA2; margin-top: 4px; }
+.btn-sec {
+  height: 64px; line-height: 64px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 16px; font-size: 22px;
+}
+</style>

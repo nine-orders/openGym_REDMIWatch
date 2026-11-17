@@ -1,0 +1,782 @@
+<template>
+  <div class="pg">
+    <text class="loading" if="{{ !ready }}">载入中…</text>
+
+    <div class="col" if="{{ ready && err }}">
+      <text class="err">{{ err }}</text>
+      <text class="btn-sec" onclick="goHome">返回主页</text>
+    </div>
+
+    <!-- ============ 训练界面 ============ -->
+    <div class="col" if="{{ ready && !err && phase === 'train' }}">
+      <div class="top">
+        <text class="prog">{{ prog }}</text>
+        <text class="clock">{{ elapsed }}</text>
+      </div>
+      <text class="exname">{{ curName }}</text>
+      <!-- 圆点逐个可点（找回被跳过的组）；右侧标签：热身 / 超级组（对齐 Apple Watch 版 tags） -->
+      <div class="inrow">
+        <div class="dotsrow">
+          <text class="dot {{ d.c }}" for="{{ (j, d) in dotList }}" onclick="dotTap(j)">{{ d.ch }}</text>
+        </div>
+        <div class="tags">
+          <text class="tag" if="{{ curWarmup }}">热身</text>
+          <text class="tag tgroup" if="{{ hasGroup }}">超级组</text>
+        </div>
+      </div>
+
+      <div class="col" if="{{ !curCardio }}">
+        <text class="lab">重量 {{ unit }}</text>
+        <div class="steprow">
+          <text class="step" onclick="wStep(-25)">-2.5</text>
+          <text class="step" onclick="wStep(-5)">-.5</text>
+          <text class="bigv" if="{{ dispW > 0 }}">{{ dispW }}</text>
+          <text class="bigv" if="{{ dispW <= 0 }}">自重</text>
+          <text class="step" onclick="wStep(5)">+.5</text>
+          <text class="step" onclick="wStep(25)">+2.5</text>
+        </div>
+        <text class="lab">{{ modeSec ? '秒数' : '次数' }}</text>
+        <div class="steprow">
+          <text class="step wide" onclick="rStep(-1)">-1</text>
+          <text class="bigv">{{ dispR }}</text>
+          <text class="step wide" onclick="rStep(1)">+1</text>
+        </div>
+      </div>
+      <text class="cardiohint" if="{{ curCardio }}">有氧组：不带数值，数值在手机端记</text>
+
+      <!-- 单侧组：L/R 双按钮各记一侧（S6）；普通组：完成本组。
+           跳过 = 导航行「跳过这组」两段点按确认（Vela 实测 onlongpress 不触发、900ms 松开算
+           click，不能用长按承载跳过，见 s6 文档） -->
+      <text class="btn-main" if="{{ !perSide }}" onclick="doneTap">{{ skipConfirm ? '点「跳过这组」确认' : '完成本组' }}</text>
+      <div class="row2" if="{{ perSide }}">
+        <text class="btn-sec {{ lDone ? 'dim' : '' }}" onclick="sideTap('L')">{{ lDone ? '左 ✓' : '完成左侧' }}</text>
+        <text class="btn-sec {{ rDone ? 'dim' : '' }}" onclick="sideTap('R')">{{ rDone ? '右 ✓' : '完成右侧' }}</text>
+      </div>
+      <div class="row3">
+        <text class="btn3" onclick="prevEx">上一动作</text>
+        <text class="btn3" onclick="skipTap">{{ skipConfirm ? '确认跳过?' : '跳过这组' }}</text>
+        <text class="btn3" onclick="nextEx">下一动作</text>
+      </div>
+      <text class="link-end" onclick="endTap">结束训练</text>
+    </div>
+
+    <!-- ============ 休息界面 ============ -->
+    <div class="col" if="{{ ready && !err && phase === 'rest' }}">
+      <text class="rest-lab">休息中</text>
+      <text class="rest-t">{{ restTxt }}</text>
+      <div class="bar">
+        <div class="bar-in" style="width: {{ restBar }}%"></div>
+      </div>
+      <text class="next">下一组</text>
+      <text class="next-v">{{ nextName }}</text>
+      <text class="next-s">{{ nextSetTxt }}</text>
+      <div class="row2">
+        <text class="btn-sec" onclick="restAdd">+30 秒</text>
+        <text class="btn-sec" onclick="restSkip">跳过休息</text>
+      </div>
+      <text class="link-end" onclick="endTap">结束训练</text>
+    </div>
+
+    <!-- ============ 总结界面 ============ -->
+    <div class="col" if="{{ ready && !err && phase === 'summary' }}">
+      <text class="sum-title">训练完成</text>
+      <text class="sum-big">{{ sumSets }} 组 · {{ sumVol }} {{ unit }}</text>
+      <text class="sum-min">用时约 {{ sumMin }} 分钟</text>
+      <text class="sum-pr" if="{{ sumPrs }}">PR：{{ sumPrs }}</text>
+      <scroll class="sum-list">
+        <text class="sum-line" for="{{ (i, ln) in sumList }}">{{ ln }}</text>
+      </scroll>
+      <text class="btn-main" if="{{ saveState !== 1 }}" onclick="saveTap">{{ busy ? '同步中…' : (saveState === 2 ? '重试同步' : '结束并同步') }}</text>
+      <text class="ok" if="{{ saveState === 1 }}">已发到手机 ✓</text>
+      <text class="warn" if="{{ saveState === 2 }}">未送达：{{ syncMsg }}（稍后自动补投）</text>
+      <div class="row2">
+        <text class="btn-sec" onclick="goHome">返回</text>
+        <!-- v2 停止语义（S7 按 s7-real-device 发现 1 定稿文案）：abandon = 本端停止跟踪，
+             已记的组手机照收、手机端训练继续（回手机上结束）；文案明确「手机继续」 -->
+        <div class="btn-sec danger qstop" if="{{ saveState !== 1 }}" onclick="quitTap">
+          <text if="{{ confirmQuit }}">再点一次确认停止</text>
+          <text if="{{ !confirmQuit }}">手表停止跟踪</text>
+          <text if="{{ !confirmQuit }}">（手机继续）</text>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 挑选手机端下发的就绪会话 ============ -->
+    <div class="col" if="{{ ready && !err && phase === 'others' }}">
+      <text class="sum-title">今天没有安排</text>
+      <text class="others-hint">也可以从这些动作单开始：</text>
+      <scroll class="others-list">
+        <text class="btn-sec others-row" for="{{ (i, o) in others }}" onclick="startOther(i)">{{ o.name }}</text>
+      </scroll>
+      <text class="link-end" onclick="goHome">先不了</text>
+    </div>
+  </div>
+</template>
+
+<script>
+// v2 会话页（S4 建，S6 补全 UI 语义）：手机 hub 下发的快照（session-core 状态机）驱动，
+// 记组/开局/结束产出事件交 hub.js 的本地队列上报（ack 后删队），手机端负责落库训练。
+// S6 接入 session-core 的全部展示语义（对齐 Apple Watch 版 OpenGymWatchApp.swift）：
+//   跳过 = 「跳过这组」两段点按确认（Apple 是长按弹确认框；Vela 实测 onlongpress 不触发、
+//          900ms 松开算 click，长按承载不了跳过，改专用键）；被跳的组圆点变 ✕、点它找回；
+//   单侧组 = L/R 双按钮各记一侧（Apple 是单键自动轮流 + Left/Right 标签）；
+//   热身/超级组标签；进度与总结排除热身组（progress/summary 口径在 core）；
+//   有氧组不带数值（数值在手机端记）；计时组记秒；restSec=0 不休息。
+// 与 v1 页面（pages/session，直连 PC 整档 PUT）并存：v1 保留为 fallback（S6 决定，
+// 见 docs/watch-v2/s6-ui-integration.md）。
+import router from '@system.router'
+import { buzz } from '../../js/store'
+import { syncSnapshot, loadState, saveState, recordSet, begin, end, abandon, flush, emitEvent, phoneSupports, uid, expireIfStale } from '../../js/hub'
+import { setIndex, next, progress, summary, skip, isSkipped, sideUp, restAdjustEvent, restSkipEvent } from '../../js/session-core'
+
+const pad = n => (n < 10 ? '0' + n : '' + n)
+const fmtW = n => Math.round((Number(n) || 0) * 10) / 10
+
+export default {
+  data: {
+    timer: null,
+    pollT: null,
+    pollMs: 10000,
+    ready: false,
+    err: '',
+    phase: 'train',
+    state: null,
+    lastW: null,
+    wid: null,
+    unit: 'kg',
+    exI: 0,
+    setI: 0,
+    modeSec: false,
+    curCardio: false,
+    curWarmup: false,
+    hasGroup: false,
+    perSide: false,
+    upSide: '',
+    lDone: false,
+    rDone: false,
+    skipConfirm: false,
+    curName: '',
+    dotList: [],
+    prog: '',
+    elapsed: '0:00',
+    dispW: 0,
+    dispR: 0,
+    restTxt: '0:00',
+    restBar: 0,
+    restEndAt: 0,
+    restTotal: 90,
+    nextName: '',
+    nextSetTxt: '',
+    sumSets: 0,
+    sumVol: 0,
+    sumMin: 0,
+    sumPrs: '',
+    sumList: [],
+    others: [],
+    busy: false,
+    saveState: 0,
+    syncMsg: '',
+    confirmQuit: false,
+    lastRestEventAt: 0
+  },
+
+  async onInit() {
+    // S10 会话过期（docs/watch-v2/s10）：隔夜/久置的本地会话在进入本页时自动离场——
+    // finish 事件补投给手机落库，wid 进 tombstone 不被旧快照复活。正在用的会话（页面
+    // 开着）不会触发，训练中轮询不查。
+    await expireIfStale()
+    let st = null
+    try {
+      st = await syncSnapshot()
+    } catch (e) {
+      // 断网：本地已有进行中的会话就接着记（重启恢复语义），否则给出可读错误
+      const local = await loadState()
+      if (local && local.workout) { this.adopt(local); this.ready = true; return }
+      this.err = '连不上手机：' + e.message
+      this.ready = true
+      return
+    }
+    let s = st.state
+    if (!s) s = await loadState()
+    this.state = s
+    if (s && s.workout) {
+      this.adopt(s)
+    } else if (s && s.ready && s.ready.today) {
+      this.adopt(await begin(s.ready.today))
+    } else if (s && s.ready && s.ready.others && s.ready.others.length) {
+      this.others = s.ready.others.map(r => ({ name: r.name || '未命名' }))
+      this.phase = 'others'
+    } else {
+      this.err = '手机上没有可开始的动作单：先在手机 openGym 里添加，下拉刷新后再试'
+    }
+    this.ready = true
+  },
+
+  onShow() {
+    if (this.timer) return
+    this.timer = setInterval(() => this.tick(), 1000)
+    this.pollLoop()
+  },
+  onHide() { this.stopAll() },
+  onDestroy() { this.stopAll() },
+  stopAll() {
+    if (this.timer) { clearInterval(this.timer); this.timer = null }
+    if (this.pollT) { clearTimeout(this.pollT); this.pollT = null }
+  },
+
+  // ---------- 快照轮询（S3 契约：训练中 10s，失败指数退避至 60s） ----------
+  pollLoop() {
+    if (this.pollT) return
+    this.pollT = setTimeout(async () => {
+      this.pollT = null
+      await this.pollOnce()
+      if (this.timer) this.pollLoop()
+    }, this.pollMs)
+  },
+  async pollOnce() {
+    try {
+      const r = await syncSnapshot()
+      this.pollMs = 10000
+      if (r.changed && r.state) this.reconcile(r.state)
+      await flush()
+    } catch (e) {
+      this.pollMs = Math.min(60000, this.pollMs * 2)
+    }
+  },
+
+  // ---------- 快照盖上来之后的对账 ----------
+  reconcile(s) {
+    const prev = this.state && this.state.workout ? this.state.workout : this.lastW
+    this.state = s
+    const w = s.workout
+    if (!w) {
+      // 手机端结束了这场训练（或还没发过）：记组页/休息页跟它一起结束
+      if (this.wid && (this.phase === 'train' || this.phase === 'rest')) this.enterSummary(prev, true)
+      return
+    }
+    if (w.id !== this.wid) { this.adopt(s); return }
+    // 同一场：手机记掉的组（本端没有 pending 的）让位
+    if (this.phase === 'train') {
+      const row = w.entries[this.exI] && w.entries[this.exI].sets[this.setI]
+      if (row && row.done) {
+        const p = this.findPos(s, this.exI)
+        if (p) { this.exI = p[0]; this.setI = p[1]; s.entryIndex = p[0] } else { this.enterSummary(w, false); return }
+      }
+    }
+    // v2.1 乐观休息对账（docs/watch-v2/s9，fork 参考）：手机端休息盖上来。采纳守卫——
+    // 本端没有未确认的休息事件（lastRestEventAt=0），或手机盖章（rest.at）不早于它；
+    // 盖章缺失（旧手机）按不采纳。只进/只延长，不从快照退出（快照无 rest 也可能是手机
+    // 屏幕没开，不是"休息结束了"——两种情况分不清，退出永远由本端用户决定）。
+    const pr = w.rest
+    if (!this.busy && pr && pr.endsAt > Date.now()) {
+      const fresh = !this.lastRestEventAt || (pr.at != null && pr.at >= this.lastRestEventAt)
+      if (fresh && this.phase === 'rest') {
+        if (pr.endsAt > this.restEndAt) {
+          this.restTotal = Math.max(this.restTotal, Math.ceil((pr.endsAt - Date.now()) / 1000))
+          this.restEndAt = pr.endsAt
+          this.tickRest()
+        }
+      } else if (fresh && this.phase === 'train') {
+        // 手机端在休息而手表停在记组页：跟手机进休息页（Apple 版快照 rest 的本意）。
+        // 总时长用手机带的 total，没有就按当前动作的休息秒数画条。
+        const en = w.entries[this.exI]
+        const rs = pr.total ? pr.total : (en && en.restSec != null ? en.restSec : s.restSec || 90)
+        this.restTotal = rs
+        this.restEndAt = pr.endsAt
+        this.skipConfirm = false
+        this.phase = 'rest'
+        this.tickRest()
+      }
+    }
+    this.refresh()
+  },
+
+  // 从 (ei) 起找下一个该做的组：本动作内 setIndex，再往后每个动作；全完成返回 null
+  findPos(s, ei) {
+    for (let n = ei; n < s.workout.entries.length; n++) {
+      const i = setIndex(s, n)
+      if (i != null) return [n, i]
+    }
+    for (let n = 0; n < ei; n++) {
+      const i = setIndex(s, n)
+      if (i != null) return [n, i]
+    }
+    return null
+  },
+
+  adopt(s) {
+    this.state = s
+    const w = s.workout
+    this.wid = w.id != null ? w.id : null
+    this.lastW = w
+    this.unit = w.unit || s.unit || 'kg'
+    this.others = []
+    let ei = s.entryIndex != null ? s.entryIndex : 0
+    if (ei >= w.entries.length) ei = w.entries.length - 1
+    const pos = this.findPos(s, ei)
+    if (pos) {
+      this.exI = pos[0]
+      this.setI = pos[1]
+      s.entryIndex = pos[0]
+      this.phase = 'train'
+      this.refresh()
+    } else {
+      this.enterSummary(w, false)   // 全部记完才接上：直接看总结
+    }
+  },
+
+  // ---------- 刷新展示 ----------
+  refresh() {
+    const s = this.state
+    const w = s && s.workout
+    if (!w) return
+    const en = w.entries[this.exI]
+    if (!en) return
+    let row = en.sets[this.setI]
+    if (!row) { this.setI = 0; row = en.sets[0] }
+    this.modeSec = en.mode === 'time'
+    this.curCardio = en.mode === 'cardio'
+    this.curName = en.name
+    this.hasGroup = en.group != null
+    this.curWarmup = row.warmup === true
+    this.perSide = !!row.sides
+    const up = this.perSide ? sideUp(row) : null
+    this.upSide = up || ''
+    this.lDone = this.perSide && row.sides.L.done === true
+    this.rDone = this.perSide && row.sides.R.done === true
+    // 展示值：单侧组取该练的那一侧的值；否则沿用本动作上一组实际完成的重量/次数，
+    // 没有则用本组计划值
+    let pw = row.w
+    let pr = this.modeSec ? (row.sec != null ? row.sec : row.r) : row.r
+    if (up) {
+      const one = row.sides[up]
+      pw = one.w != null ? one.w : row.w
+      pr = one.r != null ? one.r : row.r
+    } else {
+      for (let j = this.setI - 1; j >= 0; j--) {
+        if (en.sets[j].done) {
+          pw = en.sets[j].w
+          pr = this.modeSec ? (en.sets[j].sec != null ? en.sets[j].sec : en.sets[j].r) : en.sets[j].r
+          break
+        }
+      }
+    }
+    this.dispW = fmtW(pw)
+    this.dispR = Math.round(pr != null ? pr : 0)
+    // 圆点：● 完成 / ◉ 当前 / ◐ 单侧完成一半 / ○ 未做 / ✕ 被跳过（✕ 白色 = 正被点选找回）
+    this.dotList = en.sets.map((x, j) => {
+      let ch = '○'
+      let c = 'dOpen'
+      const half = !x.done && x.sides && (x.sides.L.done === true || x.sides.R.done === true)
+      if (x.done) { ch = '●'; c = 'dDone' }
+      else if (isSkipped(s, en.id, j)) { ch = '✕'; c = j === this.setI ? 'dSkipCur' : 'dSkip' }
+      else if (j === this.setI) { ch = '◉'; c = 'dCur' }
+      else if (half) { ch = '◐'; c = 'dHalf' }
+      return { ch: ch, c: c + (x.warmup ? ' dWarm' : '') }
+    })
+    const t = progress(s)
+    this.prog = (this.exI + 1) + '/' + w.entries.length + ' 动作 · ' + t.done + '/' + t.total + ' 组'
+    this.elapsed = this.fmtClock(Date.now() - (w.start != null ? w.start : Date.now()))
+    this.nextName = en.name
+    if (en.mode === 'cardio') {
+      this.nextSetTxt = '有氧组，数值在手机端记'
+    } else {
+      const r = this.modeSec ? (row.sec != null ? row.sec : row.r) : row.r
+      this.nextSetTxt = (row.w != null && row.w > 0)
+        ? (fmtW(row.w) + ' ' + this.unit + ' × ' + r + (this.modeSec ? ' 秒' : ' 次'))
+        : ('自重 × ' + r + (this.modeSec ? ' 秒' : ' 次'))
+    }
+  },
+
+  tick() {
+    const s = this.state
+    if (!s || !s.workout) return
+    this.elapsed = this.fmtClock(Date.now() - (s.workout.start != null ? s.workout.start : Date.now()))
+    if (this.phase === 'rest') this.tickRest()
+  },
+  tickRest() {
+    const left = Math.max(0, this.restEndAt - Date.now())
+    const sec = Math.ceil(left / 1000)
+    this.restTxt = pad(Math.floor(sec / 60)) + ':' + pad(sec % 60)
+    this.restBar = Math.round(100 * (1 - left / (this.restTotal * 1000)))
+    if (left <= 0) {
+      buzz('long')
+      this.skipConfirm = false
+      this.phase = 'train'
+      this.refresh()
+    }
+  },
+  fmtClock(ms) {
+    const s = Math.floor(ms / 1000)
+    const m = Math.floor(s / 60)
+    const h = Math.floor(m / 60)
+    return h > 0 ? (h + ':' + pad(m % 60) + ':' + pad(s % 60)) : (m + ':' + pad(s % 60))
+  },
+
+  // ---------- 调节 ----------
+  wStep(d10) {
+    this.dispW = fmtW(Math.max(0, this.dispW + d10 / 10))
+    buzz('short')
+  },
+  rStep(d) {
+    const min = this.modeSec ? 5 : 1
+    this.dispR = Math.max(min, Math.round(this.dispR + d))
+    buzz('short')
+  },
+
+  // ---------- 完成一组 ----------
+  // 从页面数值收集要记的内容：有氧不带数值；计时组记秒；其余记重量×次数
+  collectVals(en) {
+    const o = {}
+    if (en.mode === 'cardio') return o
+    if (this.modeSec) {
+      o.sec = Math.max(5, Math.round(this.dispR))
+      return o
+    }
+    o.w = Math.max(0, fmtW(this.dispW))
+    o.r = Math.max(1, Math.round(this.dispR))
+    return o
+  },
+  async doneTap() {
+    const s = this.state
+    const w = s && s.workout
+    if (!w || this.phase !== 'train' || this.busy) return
+    this.skipConfirm = false
+    const en = w.entries[this.exI]
+    const row = en.sets[this.setI]
+    if (row.done) { this.advance(); return }
+    // 汗手双击是一次组，不是这一下和下一组（Swift completeSet 的 0.7s 防抖）
+    if (this._lastTick && Date.now() - this._lastTick < 700) return
+    this._lastTick = Date.now()
+    this.busy = true
+    this.state = await recordSet(this.exI, this.setI, this.collectVals(en))
+    this.busy = false
+    buzz('short')
+    this.advance()
+  },
+  // 单侧组的一侧（S6：L/R 双按钮，用户可任选先练哪侧；完成的那侧按钮置灰打勾）
+  async sideTap(side) {
+    const s = this.state
+    const w = s && s.workout
+    if (!w || this.phase !== 'train' || this.busy) return
+    this.skipConfirm = false
+    const en = w.entries[this.exI]
+    const row = en.sets[this.setI]
+    if (!row.sides || row.sides[side].done === true) return
+    if (this._lastTick && Date.now() - this._lastTick < 700) return
+    this._lastTick = Date.now()
+    const o = this.collectVals(en)
+    o.side = side
+    this.busy = true
+    this.state = await recordSet(this.exI, this.setI, o)
+    this.busy = false
+    buzz('short')
+    this.advance()
+  },
+  advance() {
+    const s = this.state
+    this.skipConfirm = false
+    if (!s || !s.workout) { this.enterSummary(this.lastW, false); return }
+    const n = next(s, this.exI, this.setI)
+    if (n.entry >= s.workout.entries.length) { this.enterSummary(s.workout, false); return }
+    this.exI = n.entry
+    const si = setIndex(s, n.entry)
+    this.setI = si != null ? si : 0
+    s.entryIndex = n.entry
+    saveState(s)
+    const en = s.workout.entries[this.exI]
+    const rs = en.restSec != null ? en.restSec : (s.restSec || 90)   // 动作自己的 restSec 为 0 就不休息
+    if (n.rest && rs > 0) {
+      this.restTotal = rs
+      this.restEndAt = Date.now() + rs * 1000
+      this.phase = 'rest'
+      this.tickRest()
+    } else {
+      this.phase = 'train'
+    }
+    this.refresh()
+  },
+
+  // ---------- 跳过（「跳过这组」两段点按确认；3s 内再点一次才生效） ----------
+  skipTap() {
+    if (this.phase !== 'train') return
+    const s = this.state
+    if (!s || !s.workout) return
+    if (!this.skipConfirm) {
+      this.skipConfirm = true
+      buzz('short')
+      const self = this
+      setTimeout(() => { self.skipConfirm = false }, 3000)
+      return
+    }
+    this.skipConfirm = false
+    this.skipCurrent()
+  },
+  // 被跳的组不算完成，下一组顶上来（core.skip；点它的圆点可找回）。跳过本身不休息。
+  skipCurrent() {
+    const s = this.state
+    const w = s && s.workout
+    if (!w || this.phase !== 'train') return
+    const en = w.entries[this.exI]
+    const row = en.sets[this.setI]
+    if (row && row.done) return
+    this.state = skip(s, this.exI, this.setI)
+    buzz('short')
+    const si = setIndex(this.state, this.exI)
+    if (si != null) {
+      this.setI = si
+      saveState(this.state)
+      this.refresh()
+      return
+    }
+    // 本动作没有可做的组了：去下一个还有组的动作（next 对整组被跳过的超级组会停在原地，线性兜底）
+    let to = w.entries.length
+    const n = next(this.state, this.exI, this.setI)
+    if (n.entry < to && n.entry !== this.exI) {
+      to = n.entry
+    } else if (w.entries.length > 1) {
+      const p = this.findPos(this.state, (this.exI + 1) % w.entries.length)
+      if (p) to = p[0]
+    }
+    if (to >= w.entries.length) {
+      saveState(this.state)
+      this.enterSummary(this.state.workout, false)
+      return
+    }
+    this.exI = to
+    const si2 = setIndex(this.state, to)
+    this.setI = si2 != null ? si2 : 0
+    s.entryIndex = to
+    saveState(this.state)
+    this.phase = 'train'
+    this.refresh()
+  },
+
+  // ---------- 圆点：点一下跳到该组（含被跳过的组，找回） ----------
+  dotTap(j) {
+    const s = this.state
+    const w = s && s.workout
+    if (!w || this.phase !== 'train') return
+    const en = w.entries[this.exI]
+    const row = en && en.sets[j]
+    if (!row || row.done) return
+    this.setI = j
+    buzz('short')
+    this.refresh()
+  },
+
+  // ---------- 动作切换 / 休息控制 ----------
+  navEx(d) {
+    const s = this.state
+    if (!s || !s.workout) return
+    this.skipConfirm = false
+    const last = s.workout.entries.length - 1
+    this.exI = Math.min(last, Math.max(0, this.exI + d))
+    const si = setIndex(s, this.exI)
+    this.setI = si != null ? si : 0
+    s.entryIndex = this.exI
+    saveState(s)
+    this.phase = 'train'
+    this.refresh()
+  },
+  prevEx() { this.navEx(-1) },
+  nextEx() { this.navEx(1) },
+  restAdd() {
+    this.restEndAt += 30000
+    this.restTotal += 30
+    this.tickRest()
+    this.emitRest(restAdjustEvent(this.wid, 30, Date.now(), uid()))
+  },
+  restSkip() {
+    this.skipConfirm = false
+    this.phase = 'train'
+    this.refresh()
+    this.emitRest(restSkipEvent(this.wid, Date.now(), uid()))
+  },
+  // v2.1 休息事件发手机（docs/watch-v2/s9）：本地先动（乐观），事件入队尽力上报；离线
+  // 留队列补投。手机 hub 不支持协议 v2（协商见 hub.js phoneSupports）就不发——旧手机会
+  // 安全丢弃未知事件，不发只是省队列。lastRestEventAt 记下事件时间：快照里的手机休息
+  // 盖章（rest.at）不早于它才允许盖本地（乐观守卫，见 reconcile）。
+  emitRest(ev) {
+    if (!ev) return
+    this.lastRestEventAt = ev.at
+    if (!phoneSupports(2)) return
+    emitEvent(ev).catch(() => { })
+  },
+
+  // ---------- 结束 / 同步 ----------
+  endTap() { this.enterSummary(this.state && this.state.workout, false) },
+  // w：要总结的训练。手机端结束时本地 workout 已被快照清掉，用 reconcile 传进来的最后
+  // 一眼训练（lastW）出总结；本端主动结束时它还在 state 里。
+  enterSummary(w, endedOnPhone) {
+    if (!w) w = this.lastW
+    if (!w) { this.goHome(); return }
+    this.lastW = w
+    const s = this.state
+    const su = summary(w, Date.now(), null, endedOnPhone === true)
+    this.sumSets = su.sets
+    this.sumVol = Math.round(su.volume)
+    this.sumMin = su.duration != null ? Math.max(1, Math.round(su.duration / 60)) : 0
+    this.sumPrs = su.prs && su.prs.length ? su.prs.join('、') : ''
+    // 逐动作一行：排除热身组（与 core summary 的组数/体量口径一致）；有氧不带数值
+    this.sumList = w.entries
+      .map(en => {
+        const done = en.sets.filter(x => x.done && !x.warmup)
+        if (!done.length) return null
+        if (en.mode === 'cardio') return en.name + '  ×' + done.length + '组'
+        const top = done.reduce((a, b) => ((b.w != null ? b.w : 0) > (a.w != null ? a.w : 0) ? b : a), done[0])
+        const load = (top.w != null && top.w > 0) ? fmtW(top.w) + '×' : ''
+        const unitTxt = en.mode === 'time' ? '秒' : '次'
+        const num = top.r != null ? top.r : (top.sec != null ? top.sec : 0)
+        return en.name + '  ' + load + num + unitTxt + ' ×' + done.length + '组'
+      })
+      .filter(x => x != null)
+    this.phase = 'summary'
+    this.saveState = 0
+    this.syncMsg = ''
+    this.confirmQuit = false
+    saveState(s)
+  },
+  async saveTap() {
+    if (this.busy) return
+    this.busy = true
+    try {
+      await end()            // finish 事件入队（重复调用无事件，只剩补投）
+      const ok = await flush()
+      this.saveState = ok ? 1 : 2
+      this.syncMsg = ok ? '' : '手机连不上'
+      if (ok) buzz('long')
+    } catch (e) {
+      this.saveState = 2
+      this.syncMsg = e.message
+    }
+    this.busy = false
+  },
+  // 本端放弃跟踪（「停止跟记」）：已经记出去的组手机照收，手机端训练继续，
+  // 由用户回手机上结束；本端只清场并记住 wid（旧快照不许把它复活），不发 finish 事件。
+  async quitTap() {
+    if (this.confirmQuit) {
+      await abandon()
+      this.goHome()
+      return
+    }
+    this.confirmQuit = true
+    const self = this
+    setTimeout(() => { self.confirmQuit = false }, 3000)
+  },
+  async startOther(i) {
+    const s = this.state
+    const o = s && s.ready && s.ready.others && s.ready.others[i]
+    if (!o) return
+    buzz('short')
+    this.adopt(await begin(o))
+  },
+  goHome() {
+    try { router.replace({ uri: '/pages/index' }) } catch (e) { router.back() }
+  }
+}
+</script>
+
+<style>
+/* 曜黑极简 OLED Mono 换肤（2026-11）：纯黑底 + 单一酸性绿强调 + 大数字，层级靠灰度。
+ * token：底 #000000 · 容器 #101013 · 次级钮/轨道 #19191E · 强调 #C9F73A · 强调上墨色 #0A0A0A
+ *        主文字 #F5F5F7 · 次级 #9A9AA2 · 弱化 #62626A · 成功 #35D07F；琥珀/紫/红为语义色不动。
+ * 沿用 v1 会话页样式（Vela 引擎已在模拟器踩实：div 默认 row，纵向必须显式 column） */
+.pg {
+  position: absolute; width: 432px; height: 514px;
+  background-color: #000000; padding: 26px 22px;
+  flex-direction: column;
+}
+.col { flex-direction: column; }
+.loading { font-size: 24px; color: #9A9AA2; margin-top: 200px; }
+.err { font-size: 24px; color: #f85149; margin-top: 150px; margin-bottom: 30px; }
+
+.top { flex-direction: row; justify-content: space-between; }
+.prog { font-size: 19px; color: #9A9AA2; }
+.clock { font-size: 19px; color: #9A9AA2; }
+.exname {
+  font-size: 30px; color: #F5F5F7; font-weight: bold;
+  margin-top: 4px; lines: 2; text-overflow: ellipsis;
+}
+.inrow {
+  flex-direction: row; justify-content: space-between; align-items: center;
+  margin-top: 4px; margin-bottom: 3px;
+}
+.dotsrow { flex-direction: row; }
+.dot { font-size: 28px; color: #62626A; margin-right: 10px; }
+.dDone { color: #C9F73A; }
+.dCur { color: #ffffff; }
+.dHalf { color: #C9F73A; }
+.dOpen { color: #62626A; }
+.dSkip { color: #4A4A52; }
+.dSkipCur { color: #ffffff; }
+.dWarm { color: #d29922; font-size: 20px; }
+.tags { flex-direction: row; justify-content: flex-end; }
+.tag {
+  height: 32px; line-height: 32px; padding: 0 12px;
+  font-size: 18px; color: #d29922; background-color: #101013;
+  border-radius: 10px; margin-left: 8px;
+}
+.tgroup { color: #a371f7; }
+
+.lab { font-size: 19px; color: #9A9AA2; margin: 2px 0 2px 0; }
+.steprow {
+  flex-direction: row; align-items: center; justify-content: space-between;
+  background-color: #101013; border-radius: 16px; padding: 4px 8px;
+}
+.step {
+  width: 74px; height: 52px; line-height: 52px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 12px; font-size: 22px;
+}
+.wide { width: 100px; }
+.bigv { font-size: 48px; color: #ffffff; font-weight: bold; }
+.cardiohint { font-size: 22px; color: #9A9AA2; text-align: center; margin: 20px 0 20px 0; }
+
+.btn-main {
+  height: 64px; line-height: 64px; text-align: center;
+  background-color: #C9F73A; color: #0A0A0A; border-radius: 20px;
+  font-size: 28px; font-weight: bold; margin-top: 5px; margin-bottom: 4px;
+}
+.row2 { flex-direction: row; justify-content: space-between; }
+.btn-sec {
+  width: 186px; height: 52px; line-height: 52px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 16px; font-size: 22px;
+}
+.dim { color: #62626A; }
+.danger { color: #f85149; }
+/* 停止按钮两行文案（186px 宽放不下 13 字一行）：纵向居中排两行 */
+.qstop {
+  flex-direction: column; justify-content: center; align-items: center;
+  font-size: 18px; line-height: 24px; text-align: center;
+}
+.row3 { flex-direction: row; justify-content: space-between; margin-top: 6px; }
+.btn3 {
+  width: 120px; height: 52px; line-height: 52px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 16px; font-size: 21px;
+}
+.link-end { font-size: 18px; color: #62626A; text-align: center; margin-top: 5px; }
+
+.rest-lab { font-size: 22px; color: #9A9AA2; margin-top: 20px; text-align: center; }
+.rest-t { font-size: 96px; color: #C9F73A; font-weight: bold; text-align: center; margin-top: 8px; }
+.bar {
+  height: 14px; background-color: #19191E; border-radius: 7px;
+  margin: 14px 10px 20px 10px;
+}
+.bar-in { height: 14px; background-color: #C9F73A; border-radius: 7px; }
+.next { font-size: 19px; color: #9A9AA2; text-align: center; }
+.next-v { font-size: 28px; color: #F5F5F7; font-weight: bold; text-align: center; margin-top: 4px; }
+.next-s { font-size: 24px; color: #C9F73A; text-align: center; margin-top: 2px; margin-bottom: 18px; }
+
+.sum-title { font-size: 34px; color: #F5F5F7; font-weight: bold; margin-top: 10px; }
+.sum-big { font-size: 32px; color: #C9F73A; font-weight: bold; margin-top: 8px; }
+.sum-min { font-size: 20px; color: #9A9AA2; margin-top: 4px; }
+.sum-pr { font-size: 20px; color: #35D07F; margin-top: 6px; }
+.sum-list { height: 112px; margin-top: 10px; flex-direction: column; }
+.sum-line { font-size: 20px; color: #F5F5F7; margin-bottom: 6px; }
+.ok { font-size: 22px; color: #35D07F; text-align: center; margin-top: 8px; }
+.warn { font-size: 18px; color: #d29922; margin-top: 6px; }
+
+.others-hint { font-size: 20px; color: #9A9AA2; margin-top: 4px; margin-bottom: 10px; }
+.others-list { height: 280px; flex-direction: column; }
+.others-row { width: 388px; margin-bottom: 10px; }
+</style>

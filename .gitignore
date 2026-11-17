@@ -1,0 +1,17 @@
+# 打包产物与工具链临时输出（可随时重新生成，不入库）
+watch-app/dist/
+watch-app/ide/
+watch-app/emu-*/
+watch-app/emu-*.png
+watch-app/test/.gen/
+
+# 签名材料：调试证书由你自己的 Android debug.keystore 转换而来（jks -> p12 -> pem），
+# 私钥永不入库；生成方法见 phone/README.md
+watch-app/sign/
+
+# 本地运行日志
+*.log
+
+# Windows 系统文件
+Thumbs.db
+desktop.ini

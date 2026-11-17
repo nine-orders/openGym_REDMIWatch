@@ -1,0 +1,219 @@
+<template>
+  <div class="pg">
+    <text class="title">传输诊断</text>
+    <text class="tgt" onclick="editTap">手机 {{ tgt || '(未设IP)' }}:{{ PORT }}（点此改IP）</text>
+
+    <div class="row">
+      <text class="btn {{ busy ? 'off' : '' }}" onclick="getTap">GET</text>
+      <text class="btn {{ busy ? 'off' : '' }}" onclick="postTap">POST</text>
+      <text class="btn {{ busy ? 'off' : '' }}" onclick="seqTap">连发×3</text>
+    </div>
+    <div class="row">
+      <text class="btn alt {{ busy ? 'off' : '' }}" onclick="pcTap">对照PC</text>
+      <text class="btn alt" onclick="clearTap">清屏</text>
+    </div>
+
+    <text class="msg" if="{{ !edit }}">{{ msg }}</text>
+
+    <div class="logbox {{ edit ? 'small' : '' }}" if="{{ !edit }}">
+      <text class="ln" for="{{ (i, ln) in lines }}">{{ ln }}</text>
+      <text class="ln dim" if="{{ lines.length === 0 }}">先在手机装 SpikeHub 并点 Start，再点 GET。最新在上。</text>
+    </div>
+
+    <div class="kb" if="{{ edit }}">
+      <div class="krow" for="{{ (ri, row) in rows }}">
+        <text class="key" for="{{ (ci, ch) in row }}" onclick="tapChar(ri, ci)">{{ ch }}</text>
+      </div>
+      <div class="krow">
+        <text class="key wide" onclick="tapBack">删除</text>
+        <text class="key wide" onclick="tapClearIp">清空</text>
+        <text class="key wide" onclick="tapDone">完成</text>
+      </div>
+    </div>
+
+    <text class="hint" if="{{ !edit }}">GET/POST 发往手机 SpikeHub(:8765)；对照PC 发配对服务器。两者都通=hub可行；PC通手机不通=代理不转发本机地址。</text>
+  </div>
+</template>
+
+<script>
+import fetch from '@system.fetch'
+import { sGet, sSet, buzz } from '../../js/store'
+
+const PORT = 8765
+const MAX_LINES = 8
+const HOST_CHARS = '1234567890.:'
+
+export default {
+  data: {
+    PORT: PORT,
+    host: '',     // 配对服务器 host（电脑），含端口
+    ip: '',       // 配对服务器的裸 IP，spikeHost 未设时的默认手机目标
+    sHost: '',    // 手机 spike 应用的裸 IP（独立于配对 host，测完电脑不用改回）
+    tgt: '',
+    rows: [],
+    edit: false,
+    lines: [],
+    msg: '',
+    busy: false
+  },
+  async onShow() {
+    this.host = await sGet('host', '')
+    if (this.host.indexOf('http://') === 0) this.host = this.host.slice(7)
+    this.ip = (this.host.split(':')[0] || '').trim()
+    this.sHost = await sGet('spikeHost', '')
+    if (!this.sHost) this.sHost = this.ip
+    this.tgt = this.sHost
+  },
+  clearTap() {
+    this.lines = []
+    this.msg = ''
+  },
+  editTap() {
+    this.edit = true
+    this.rebuild()
+    buzz('short')
+  },
+  rebuild() {
+    const rows = []
+    for (let i = 0; i < HOST_CHARS.length; i += 6) {
+      rows.push(HOST_CHARS.slice(i, i + 6).split(''))
+    }
+    this.rows = rows
+  },
+  tapChar(ri, ci) {
+    const ch = (this.rows[ri] || [])[ci]
+    if (!ch) return
+    this.sHost = (this.sHost + ch).slice(0, 15)
+    this.tgt = this.sHost
+    buzz('short')
+  },
+  tapBack() {
+    this.sHost = this.sHost.slice(0, -1)
+    this.tgt = this.sHost
+    buzz('short')
+  },
+  async tapClearIp() {
+    this.sHost = ''
+    this.tgt = ''
+    buzz('short')
+  },
+  async tapDone() {
+    this.edit = false
+    await sSet('spikeHost', this.sHost.trim())
+    this.tgt = this.sHost.trim()
+    buzz('long')
+  },
+  // 任何 HTTP 状态码都算"通"（诊断的是可达性，不是业务结果）；
+  // Vela fetch 没有 timeout，配 8 秒看门狗防止界面永久 busy。
+  req(method, url, body) {
+    return new Promise(resolve => {
+      let settled = false
+      let wd = null
+      const done = r => {
+        if (settled) return
+        settled = true
+        clearTimeout(wd)
+        resolve(r)
+      }
+      wd = setTimeout(() => done({ ok: false, code: 0, ms: 8000, head: '看门狗超时' }), 8000)
+      const t0 = Date.now()
+      fetch.fetch({
+        url: url,
+        method: method,
+        header: body == null ? {} : { 'Content-Type': 'application/json' },
+        data: body == null ? undefined : JSON.stringify(body),
+        responseType: 'text',
+        success: r => done({
+          ok: true,
+          code: r.code,
+          ms: Date.now() - t0,
+          head: String(r.data == null ? '' : r.data).slice(0, 80)
+        }),
+        fail: (m, c) => done({ ok: false, code: 0, ms: Date.now() - t0, head: '网络失败 ' + (m || c || '') })
+      })
+    })
+  },
+  async run(label, fn) {
+    if (this.busy) return
+    if (!this.tgt) { this.msg = '先点目标行设置手机 IP'; return }
+    this.busy = true
+    this.msg = '请求中…'
+    const line = await fn()
+    this.lines = [line].concat(this.lines).slice(0, MAX_LINES)
+    this.msg = ''
+    this.busy = false
+    buzz(line.indexOf('✗') >= 0 ? 'short' : 'long')
+  },
+  getTap() {
+    return this.run('GET', async () => {
+      const r = await this.req('GET', 'http://' + this.tgt + ':' + PORT + '/spike?t=' + Date.now(), null)
+      return 'GET ' + mark(r) + ' ' + stat(r) + ' ' + r.head
+    })
+  },
+  postTap() {
+    return this.run('POST', async () => {
+      const r = await this.req('POST', 'http://' + this.tgt + ':' + PORT + '/spike', { type: 'spike.ping', ts: Date.now() })
+      return 'POST ' + mark(r) + ' ' + stat(r) + ' ' + r.head
+    })
+  },
+  seqTap() {
+    return this.run('×3', async () => {
+      const parts = []
+      for (let i = 0; i < 3; i++) {
+        const r = await this.req('GET', 'http://' + this.tgt + ':' + PORT + '/spike?t=' + Date.now(), null)
+        parts.push(mark(r) === '✓' ? String(r.ms) + 'ms' : '✗(' + r.head + ')')
+      }
+      return '×3 ' + parts.join(' / ')
+    })
+  },
+  pcTap() {
+    return this.run('PC', async () => {
+      const r = await this.req('GET', 'http://' + this.host + '/', null)
+      return 'PC对照 ' + mark(r) + ' ' + stat(r)
+    })
+  }
+}
+
+function mark(r) { return r.ok ? '✓' : '✗' }
+function stat(r) { return r.ok ? (r.code + ' ' + r.ms + 'ms') : (r.ms + 'ms') }
+</script>
+
+<style>
+/* 曜黑极简 OLED Mono 换肤（2026-11）：纯黑底 + 单一酸性绿强调（诊断页,仅换色）。
+ * token：底 #000000 · 内嵌 #0A0A0E · 次级钮 #19191E · 强调 #C9F73A · 强调上墨色 #0A0A0A
+ *        主文字 #F5F5F7 · 弱化 #62626A · 成功 #35D07F。 */
+.pg {
+  position: absolute; width: 432px; height: 514px;
+  background-color: #000000; padding: 22px 24px;
+  flex-direction: column;
+}
+.title { font-size: 30px; color: #F5F5F7; font-weight: bold; margin-bottom: 8px; }
+.tgt { font-size: 22px; color: #C9F73A; margin-bottom: 12px; }
+.row { flex-direction: row; margin-bottom: 10px; }
+.btn {
+  width: 122px; height: 60px; line-height: 60px; text-align: center;
+  background-color: #C9F73A; color: #0A0A0A; font-size: 24px; font-weight: bold;
+  border-radius: 14px; margin-right: 10px;
+}
+/* 快应用 CSS 不支持复合选择器，状态类须用独立类名（且写在基类之后） */
+.alt { background-color: #19191E; color: #F5F5F7; font-weight: normal; }
+.off { opacity: 0.4; }
+.msg { font-size: 20px; color: #35D07F; margin-bottom: 6px; }
+.logbox {
+  height: 170px; background-color: #0A0A0E; border-radius: 12px;
+  padding: 10px 12px; margin-bottom: 8px;
+  flex-direction: column;
+}
+.small { height: 40px; }
+.ln { font-size: 18px; color: #F5F5F7; margin-bottom: 4px; }
+.dim { color: #62626A; }
+.kb { flex-direction: column; }
+.krow { flex-direction: row; margin-bottom: 8px; }
+.key {
+  width: 56px; height: 52px; line-height: 52px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 12px;
+  font-size: 24px; margin-right: 8px;
+}
+.wide { width: 104px; color: #C9F73A; }
+.hint { font-size: 16px; color: #62626A; }
+</style>

@@ -1,0 +1,122 @@
+// S8 2A：手表↔手机系统通道（@system.interconnect）传输层。
+// 本模块只做「发请求/收应答」，hub 协议语义（rev 严格单调、事件队列串行化、按 id 去重、
+// ack）一行不动、全部保留在 hub.js——这里只是把同一批请求从 HTTP 换到系统通道。
+// 通道由系统按「rpk 包名 + 签名 == 手机 App」自动建立（官方开发注意事项）；不用关心
+// 建立/销毁，注册回调收状态变化。错误码（官方文档）：1001=手机 App 未安装。
+// 手机对端应答形状与 HTTP 响应一一对应：{ id, status, body }（body 为对象或 JSON 串）。
+import IC from '@system.interconnect'
+
+// hubHost 的标记值：免输入系统配对（不是真实地址，HTTP 链路永远不解析它）
+export const IC_HOST = 'interconnect'
+
+const TIMEOUT = (typeof globalThis !== 'undefined' && globalThis.__icTimeout !== undefined)
+  ? globalThis.__icTimeout   // 测试口：加快无应答用例（真机恒为 10000）
+  : 10000
+
+let conn = null
+let reqSeq = 0
+const pending = new Map()   // id -> { resolve, reject, timer }
+let lastStatus = null       // diagnosis 结果缓存 { status, at }（0=OK）
+
+function makeId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+function ensure() {
+  if (conn) return conn
+  conn = IC.instance()
+  conn.onmessage = res => deliver(res)
+  conn.onopen = () => { /* 状态由 diagnosis/getReadyState 读，这里无需动作 */ }
+  conn.onclose = () => failAll('系统通道已断开')
+  conn.onerror = res => failAll('系统通道错误 ' + ((res && res.code) != null ? res.code : ''))
+  return conn
+}
+
+// 对端应答：{ id, status, body }。id 对不上就丢（不相干消息）。
+function deliver(res) {
+  let msg = null
+  try {
+    const s = res && typeof res.data === 'string' ? res.data : (typeof res === 'string' ? res : '')
+    if (!s) return
+    msg = JSON.parse(s)
+  } catch (e) { return }
+  if (!msg || typeof msg.id !== 'string') return
+  const p = pending.get(msg.id)
+  if (!p) return
+  pending.delete(msg.id)
+  clearTimeout(p.timer)
+  const code = typeof msg.status === 'number' ? msg.status : 200
+  if (code >= 200 && code < 300) {
+    p.resolve({ code: code, body: msg.body })
+  } else {
+    const err = new Error((msg.body && msg.body.error) ? msg.body.error : ('HTTP ' + code))
+    err.code = code
+    p.reject(err)
+  }
+}
+
+function failAll(reason) {
+  const err = new Error(reason)
+  for (const [, p] of pending) { clearTimeout(p.timer); p.reject(err) }
+  pending.clear()
+}
+
+// 诊断通道并把结果带时间戳缓存。成功回调里给 status：
+//   0=OK 链接成功 / 204=CONNECT_TIMEOUT / 1001=APP_UNINSTALLED 对端未安装 / 1000=OTHERS
+export function probeIc() {
+  return new Promise((resolve, reject) => {
+    try {
+      ensure().diagnosis({
+        timeout: TIMEOUT,
+        success: data => {
+          lastStatus = { status: typeof data.status === 'number' ? data.status : 1000, at: Date.now() }
+          resolve(lastStatus)
+        },
+        fail: (data, code) => reject(new Error('系统通道诊断失败 ' + code))
+      })
+    } catch (e) { reject(e) }
+  })
+}
+
+// 通道是否已知可用：诊断过 OK 且未过期（2 分钟）；供状态展示用，不做硬门禁。
+export function icUp() {
+  return !!(lastStatus && lastStatus.status === 0 && Date.now() - lastStatus.at < 120000)
+}
+
+// 通道上发一个 hub 请求：2xx 解析 body（兼容对端回对象或 JSON 串），非 2xx 抛 err.code
+// ——与 api.js request() 的解析/错误语义一致，调用方（hub.js）感受不到差别。
+// 任何失败都 throw，由 hubCall 决定回退；超时按 TIMEOUT。
+export function icCall(method, path, body) {
+  const c = ensure()
+  if (typeof c.send !== 'function') throw new Error('系统通道不可用')
+  const id = makeId()
+  reqSeq += 1
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id)
+      reject(new Error('系统通道应答超时'))
+    }, TIMEOUT)
+    pending.set(id, { resolve, reject, timer })
+    try {
+      c.send({
+        data: { id: id, method: method, path: path, body: body == null ? null : body },
+        success: () => { /* 送达即等应答（onmessage） */ },
+        fail: (data, code) => {
+          clearTimeout(timer)
+          pending.delete(id)
+          reject(new Error('系统通道发送失败 ' + code))
+        }
+      })
+    } catch (e) {
+      clearTimeout(timer)
+      pending.delete(id)
+      reject(e)
+    }
+  }).then(res => {
+    let b = res.body
+    if (typeof b === 'string') {
+      try { b = JSON.parse(b) } catch (e) { b = null }
+    }
+    return b
+  })
+}
