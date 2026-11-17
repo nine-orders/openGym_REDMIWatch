@@ -1,11 +1,11 @@
 # 手机端（安卓 openGym App）watch hub 集成
 
-手表的 v2 架构里，手机是**处方引擎 + 同步枢纽（hub）**：一个前台 HTTP 服务（`:8765`）把
+手表的 v2 架构里，手机是处方引擎 + 同步枢纽（hub）：一个前台 HTTP 服务（`:8765`）把
 训练快照发给手表、收手表的记组事件并落库。手表走小米运动健康的蓝牙代理到达这个服务，
 或走 `@system.interconnect` 系统通道（免输入配对）。协议见 [docs/android-hub.md](../docs/android-hub.md)
 与 [docs/watch-protocol.md](../docs/watch-protocol.md)。
 
-PC 服务器侧**不需要任何改动**（v1 直连模式用的是上游网页端自带的配对码 API）。
+PC 服务器侧不需要任何改动。
 
 ## 这里有什么
 
