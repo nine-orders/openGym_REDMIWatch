@@ -9,14 +9,11 @@
 开炼把这些搬到手腕上：
 
 - **抬腕看处方**：下一组练什么、上多少重量、做几次，休息倒计时就在表盘上走
-- **一键记组**：做完按一下，重量次数自动回传手机落库，网页端历史与 PR 随之更新
+- **一键记组**：做完按一下，记录重量和次数，完成同步后可在 openGym 网页查看历史与 PR
 - **临场调整**：重量 ±2.5/±0.5、次数 ±1、跳过这组、单侧 L/R 分开记，全程不碰手机
-- **断联不丢数**：没同步上的事件留在手表队列，回到手机旁自动补投，确认后才删，不丢不重
-- **数据全在你手里**：从手表经你自己的手机落到你自己的 openGym 服务器，不经过任何第三方云
+- **离线训练**：电脑配对后，手表可从缓存中选择动作单，练完后暂存整场训练，恢复连接再补传
+- **自托管**：训练记录可直传自己的 openGym 服务器，也可通过安卓 openGym App 中转
 - **热量心率不重记**：时长/热量/心率交给手表自带的运动模式，训练记录归 openGym，两边不打架
-
-上游 openGym 的 Apple Watch 版要 iPhone + Apple Watch 才能玩；这个项目给安卓用户
-同一套体验——一块红米 Watch 5、一部安卓手机，免刷机、全开源。
 
 [openGym](https://github.com/DuarteSantos8/openGym)（AGPL-3.0 的自托管健身记录网页）
 的红米 Watch 5 快应用客户端：手表上记每组（重量×次数）、看下一组练什么、组间休息
@@ -33,11 +30,8 @@
   POST /watch/ack      ───────────▶  按 id 确认 → 手表删本地待发队列
 ```
 
-架构与上游的 Apple Watch 版同构：手机 = 处方引擎 + 同步枢纽（hub），手表 = 纯执行器。
-手表从手机拉快照，把记组/开局/结束以事件上报（ack 后删队、离线自动补投），训练落库由
-手机完成，再经 openGym 的 sync 到 PC 网页端。组数与体量口径、PR、跳过、单侧 L/R、
-热身/超级组标签与 Apple Watch 版逐条对齐（session-core 状态机 1:1 移植，138 项 Node
-测试加 54 项 JVM 契约测试兜底）。
+上图是手机中转模式。手表向安卓 App 上报训练事件，手机接收并写入训练历史，再通过
+openGym 同步到电脑。首次打开配对设置时默认显示电脑配对，也可以在顶部切换到手机配对。
 
 ## 组成
 
@@ -53,17 +47,23 @@
 
 ## 快速开始
 
-1. 手机 APK：按 [phone/README.md](phone/README.md) 把 watch hub 集成进上游安卓
-   App 并构建（PC 服务器侧零改动）。
-2. 手表 rpk：`watch-app/scripts/package-rpk.cmd`（详见
+平时只戴手表训练，可以使用[电脑配对与离线训练](watch-app/README.md#电脑配对与离线训练)。
+先在电脑 openGym 配对并拉取动作单，训练后记录存于手表，回到电脑所在网络后自动补传。
+
+两种模式都需要先安装手表快应用：
+
+1. 手表 rpk：`watch-app/scripts/package-rpk.cmd`（详见
    [watch-app/README.md](watch-app/README.md)「七、打包」）。
-3. 真机安装：AstroBox 免刷机推送 rpk（见 watch-app/README「二」）。
-4. 配对：手机常驻通知显示「IP · 8 位 token」，手表输入即配对，约 1 分钟。
+2. 真机安装：用 AstroBox 推送 rpk，见[真机安装说明](watch-app/README.md#二真机安装astrobox免刷机)。
+
+使用手机中转时，按[安卓集成指南](phone/README.md)构建含 hub 的 openGym App，
+再按[手机配对步骤](watch-app/README.md#手机配对与训练)连接。
 
 ## 兼容性与已知限制
 
+- 电脑直连已通过 15 场离线存储和批量补传的自动化测试。真机容量和实际离线 15 天仍待验证。
 - 实测机型：红米 Watch 5（Vela 引擎快应用）。其他型号未验证，欢迎反馈。
-- 需要：安卓手机装集成 hub 的 openGym App、小米运动健康（蓝牙代理）、训练时手机在身边。
+- 手机中转需要：安卓手机装集成 hub 的 openGym App、小米运动健康（蓝牙代理）、训练时手机在身边。
 - MIUI/HyperOS 杀后台、无心率写入通道、休息倒计时同步边界等已知限制，见
   [watch-app/README.md](watch-app/README.md)「八」。
 - 安装用社区工具 AstroBox + 米坛社区（bandbbs.cn），不改固件；变砖风险自负，
@@ -71,6 +71,7 @@
 
 ## 文档
 
+- [产品需求与验收](docs/prd.md)
 - [docs/watch-protocol.md](docs/watch-protocol.md) — 手表↔hub 协议 v2.1（快照/事件/ack 契约）
 - [docs/android-hub.md](docs/android-hub.md) — 安卓 hub 设计与踩坑
 - [docs/rest-sync.md](docs/rest-sync.md) — 休息倒计时双向同步（v2.1）

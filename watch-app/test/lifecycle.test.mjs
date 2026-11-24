@@ -308,6 +308,7 @@ test('pick：空计划显示空态提示', async () => {
 
 test('pair onShow：host 优先取 hubHost 并去 http:// 前缀；键盘按页签重建', async () => {
   await sSet('hubHost', 'http://192.168.1.20')
+  await sSet('hubToken', '12345678')
   const p = mount(comps.pair)
   await p.onShow()
   assert.equal(p.host, '192.168.1.20')
@@ -324,6 +325,7 @@ test('pair onShow：host 优先取 hubHost 并去 http:// 前缀；键盘按页�
 
 test('pair pairTap：缺 host / 配对码不是 8 位数字先本地校验，不发请求', async () => {
   const p = mount(comps.pair)
+  p.pairMode = 'hub'
   await p.pairTap()
   assert.match(p.msg, /服务器/)
   p.host = '192.168.1.20'
@@ -343,6 +345,7 @@ test('pair pairTap：hub 配对成功——ping+快照种子，token 验证过�
     return { code: 404, data: { ok: false, error: 'not_found' } }
   }
   const p = mount(comps.pair)
+  p.pairMode = 'hub'
   p.host = '192.168.1.20'
   p.code = '13572468'
   await p.pairTap()
@@ -359,6 +362,7 @@ test('pair pairTap：hub 配对成功——ping+快照种子，token 验证过�
 test('pair pairTap：ping 失败（token 错）→ token 清掉不算配对', async () => {
   globalThis.__velaFetch = async () => ({ code: 401, data: { ok: false, error: 'unauthorized' } })
   const p = mount(comps.pair)
+  p.pairMode = 'hub'
   p.host = '192.168.1.20'
   p.code = '13572468'
   await p.pairTap()
@@ -377,14 +381,21 @@ test('pair spikeTap：跳转传输诊断页', async () => {
 
 test('pair modeTap：hub↔直连 切换持久化 pairMode，键盘与状态文案按模式重建', async () => {
   const p = mount(comps.pair)
-  await p.onShow()                        // 无凭证 → 默认 hub（v2 主路径）
-  assert.equal(p.pairMode, 'hub')
+  await p.onShow()                        // 首次使用默认电脑配对
+  assert.equal(p.pairMode, 'direct')
   assert.equal(p.rows.length, 2)          // host '1234567890.:' 12 个按 6/行
   p.setTab('code')
-  assert.equal(p.rows.length, 2)          // hub token 10 个数字按 6/行
+  assert.equal(p.rows.length, 4)          // 电脑配对码按 8 个字符一行
+  await sSet('hubHost', '192.168.1.20')
+  await sSet('hubToken', '12345678')
+  await p.modeTap()
+  assert.equal(p.pairMode, 'hub')
+  assert.equal(p.host, '192.168.1.20')
+  assert.equal(p.rows.length, 2)          // 手机配对码只含数字
 
   await p.modeTap()
   assert.equal(p.pairMode, 'direct')
+  assert.equal(p.host, '')
   assert.match(p.msg, /直连服务器/)
   assert.equal(await sGet('pairMode', ''), 'direct')
   p.setTab('code')
@@ -466,6 +477,7 @@ test('index onShow：pairMode 显式 direct 时忽略 hub 凭证，按直连显�
 // ---------- pair/index（S8 2A：免输入系统配对 interconnect） ----------
 
 test('pair onShow：系统通道诊断 1001（手机未装 App）→ 明确文案不静默', async () => {
+  await sSet('pairMode', 'hub')
   globalThis.__icDiag = 1001
   const p = mount(comps.pair)
   await p.onShow()
@@ -475,6 +487,7 @@ test('pair onShow：系统通道诊断 1001（手机未装 App）→ 明确文�
 })
 
 test('pair onShow：系统通道 OK 且无凭证 → 免输入自动配对（ping+快照种子、写 interconnect 凭证、自动回主页）', async () => {
+  await sSet('pairMode', 'hub')
   globalThis.__icDiag = 0
   globalThis.__icTimeout = 60
   globalThis.__icSent = []

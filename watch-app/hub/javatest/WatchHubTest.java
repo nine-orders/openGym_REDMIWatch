@@ -82,9 +82,9 @@ public class WatchHubTest {
         r = req("GET", base + "/watch/ping", null, auth);
         check("ping with token", r.code == 200 && r.body.contains("\"ok\":true")
             && r.body.contains("\"server\":\"hub\"") && r.body.contains("\"time\":1"), r);
-        // protocol version (v2.1, s9): the watch's capability negotiation reads this field
+        // v3 advertises support for the expanded watch queue.
         r = req("GET", base + "/watch/ping", null, auth);
-        check("ping carries proto", r.body.contains("\"proto\":2"), r);
+        check("ping carries proto", r.body.contains("\"proto\":3"), r);
 
         // snapshot before the page ever sent one: ok, rev 0, snapshot null
         r = req("GET", base + "/watch/snapshot", null, auth);
@@ -232,15 +232,22 @@ public class WatchHubTest {
         bad.data = "{oops".getBytes(StandardCharsets.UTF_8);
         check("queue corrupt storage -> empty", WatchEventQueue.load(bad).size() == 0, "?");
 
-        // cap: oldest first out
+        // A full inbox keeps old events and acknowledges only what it can keep.
         MemStorage cap = new MemStorage();
         WatchEventQueue qc = WatchEventQueue.load(cap);
         List<Object> many = new ArrayList<Object>();
-        for (int i = 0; i < 505; i++) many.add(ev("n" + i));
-        qc.append(many);
-        List<Object> all = qc.all();
-        check("queue capped at 500", all.size() == 500 && "n5".equals(WatchEventQueue.idOf(all.get(0)))
-            && "n504".equals(WatchEventQueue.idOf(all.get(499))), "first=" + WatchEventQueue.idOf(all.get(0)));
+        for (int i = 0; i <= WatchEventQueue.CAP; i++) many.add(ev("n" + i));
+        List<String> accepted = qc.append(many);
+        List<Object> all = WatchEventQueue.load(cap).all();
+        String overflow = "n" + WatchEventQueue.CAP;
+        check("full queue preserves accepted events", all.size() == WatchEventQueue.CAP
+            && accepted.size() == WatchEventQueue.CAP && "n0".equals(WatchEventQueue.idOf(all.get(0)))
+            && !accepted.contains(overflow), "accepted=" + accepted.size());
+        check("full queue still acknowledges duplicates",
+            qc.append(Arrays.asList((Object) ev("n0"), ev(overflow))).equals(Arrays.asList("n0")), "?");
+        qc.ack(Arrays.asList("n0"));
+        check("queue accepts retry after draining",
+            qc.append(Arrays.asList((Object) ev(overflow))).equals(Arrays.asList(overflow)), "?");
     }
 
     static Map<String, Object> ev(String id) {

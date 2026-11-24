@@ -9,8 +9,7 @@ import java.util.Set;
 
 /**
  * The phone-side event queue: what arrived from the watch but has not been applied and
- * acknowledged by the page yet. The same semantics as the iOS plugin's queue file
- * (WatchBridgePlugin.swift): append-if-new by event id at arrival, capped oldest-first,
+ * acknowledged by the page yet. It deduplicates by event id at arrival and is
  * drained and acked through the WatchBridge plugin once the page has applied each event
  * and saved. Until then the queue is the event's last copy, so every change is written
  * back to storage at once.
@@ -19,7 +18,7 @@ import java.util.Set;
  * app's files directory, the PC JVM test an in-memory array.
  */
 public final class WatchEventQueue {
-    public static final int CAP = 500; // a queue no page drained for a long time, oldest first
+    public static final int CAP = 1200;
 
     public interface Storage {
         /** The stored bytes, or null when nothing is stored yet. */
@@ -57,9 +56,8 @@ public final class WatchEventQueue {
     }
 
     /**
-     * Append-if-new by id. Returns the acked ids — every well-formed event's id, whether
-     * new or a resend of one already queued. A resend happens when the POST's response was
-     * lost in transit: the phone stored the event, the watch never heard, it sends again.
+     * Returns the ids already queued or accepted into the available space. Excess events
+     * stay unacknowledged so the watch can retry after the page drains the inbox.
      */
     public synchronized List<String> append(List<Object> incoming) {
         List<String> acked = new ArrayList<String>();
@@ -68,11 +66,15 @@ public final class WatchEventQueue {
             for (Object o : incoming) {
                 String id = idOf(o);
                 if (id == null) continue; // malformed: skipped, never acked
-                acked.add(id);
-                if (ids.add(id)) {
-                    events.add(o);
-                    dirty = true;
+                if (ids.contains(id)) {
+                    acked.add(id);
+                    continue;
                 }
+                if (events.size() >= CAP) continue;
+                ids.add(id);
+                events.add(o);
+                acked.add(id);
+                dirty = true;
             }
         }
         if (dirty) persist();
@@ -109,10 +111,6 @@ public final class WatchEventQueue {
     }
 
     private void persist() {
-        while (events.size() > CAP) {
-            String gone = idOf(events.remove(0));
-            if (gone != null) ids.remove(gone);
-        }
         try {
             storage.write(WatchJson.write(events).getBytes(StandardCharsets.UTF_8));
         } catch (Exception ignored) {

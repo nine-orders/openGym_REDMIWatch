@@ -12,7 +12,7 @@ export function startFakeHub({ token = '12345678', port = 0, host = '127.0.0.1' 
   const state = {
     snapshot: null,     // 手机页面最后一次 sendSnapshot 的快照（null = 进程刚重启没发过）
     rev: 0,             // 每次 setSnapshot +1
-    queue: [],          // 手机侧事件队列：按 id 去重追加、无淘汰（真机 500 条上限）
+    queue: [],          // 手机侧事件队列：按 id 去重追加、无淘汰（真机 1200 条上限）
     ackLog: [],         // 每次 POST acked 的 id（断言用）
     calls: []           // { method, path, auth, bodyLen } 请求流水
   }

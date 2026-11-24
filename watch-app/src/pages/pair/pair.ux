@@ -2,6 +2,7 @@
   <div class="pg">
     <div class="trow">
       <text class="title">配对设置</text>
+      <text class="mtoggle" onclick="modeTap">{{ pairMode === 'direct' ? '电脑配对 ▸' : '手机配对 ▸' }}</text>
       <text class="link" onclick="spikeTap">传输诊断→</text>
     </div>
 
@@ -37,8 +38,7 @@
 //     8 位数字 token（docs/watch-v2/s3-android-hub.md 契约）；成功自动回主页。
 //   直连服务器（v1 fallback）：host = 电脑 IP（无端口默认 :8080），配对码 = 网页端
 //     「设置 → 配对手机应用」的 8 位码（api.js redeem，5 分钟有效）；成功拉档案建计划缓存。
-//   模式未显式选过时按既有凭证自动判定（hub 凭证齐 → hub；v1 凭证齐 → 直连；都没有
-//   → 默认 hub，v2 主路径）——与 index.ux 的判定规则一致。
+//   模式未显式选过时优先沿用已有手机配对，否则显示电脑配对。
 import router from '@system.router'
 import { sGet, sSet, setJSON, buzz } from '../../js/store'
 import { ping, syncSnapshot } from '../../js/hub'
@@ -53,7 +53,7 @@ const DIRECT_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 export default {
   data: {
     tab: 'host',
-    pairMode: 'hub',
+    pairMode: 'direct',
     host: '',
     code: '',
     rows: [],
@@ -63,19 +63,15 @@ export default {
     busy: false
   },
   async onShow() {
-    // 模式解析：显式选择优先；否则按凭证自动判定；两者皆无默认 hub（v2 主路径）
+    // 显式选择优先。已有手机凭证时沿用手机配对，否则默认电脑配对。
     let pm = await sGet('pairMode', '')
     if (pm !== 'hub' && pm !== 'direct') {
       const hh = await sGet('hubHost', '')
       const ht = await sGet('hubToken', '')
-      const h = await sGet('host', '')
-      const t = await sGet('token', '')
-      pm = (hh && ht) ? 'hub' : ((h && t) ? 'direct' : 'hub')
+      pm = (hh && ht) ? 'hub' : 'direct'
     }
     this.pairMode = pm
-    this.host = pm === 'hub'
-      ? (await sGet('hubHost', '') || await sGet('host', ''))
-      : (await sGet('host', '') || await sGet('hubHost', ''))
+    this.host = await sGet(pm === 'hub' ? 'hubHost' : 'host', '')
     if (this.host.indexOf('http://') === 0) this.host = this.host.slice(7)
     this.rebuild()
     // S8 2A：免输入系统配对探测（不阻塞输入；成功才接管）
@@ -84,13 +80,15 @@ export default {
   // 系统通道探测 + 免输入配对：诊断 OK 且无既有 hub 凭证时自动完成原来手点的配对；
   // 失败给出明确状态文案（手机未安装 / 通道不可用），绝不静默卡住——手动配对照常可用。
   async _probeIc() {
-    const pm = this.pairMode
+    if (this.pairMode !== 'hub') return
     const hh = await sGet('hubHost', '')
     const ht = await sGet('hubToken', '')
+    if (hh && ht) return
     try {
       const st = await probeIc()
+      if (this.pairMode !== 'hub' || this.busy) return
       if (st.status === 0) {
-        if (pm === 'direct' || (hh && ht)) return   // 用户选了直连 / 已配对过：不打扰
+        this.busy = true
         await sSet('hubHost', IC_HOST)
         await sSet('hubToken', IC_HOST)
         this.msg = '系统通道已连接，正在确认手机 hub…'
@@ -106,15 +104,17 @@ export default {
           await sSet('hubHost', '')
           await sSet('hubToken', '')
           this.msg = '系统通道已连但 hub 无响应：' + e.message + '（可用 IP+token 手动配对）'
+        } finally {
+          this.busy = false
         }
         return
       }
-      if (pm === 'direct' || (hh && ht) || this.msg) return
+      if (this.msg) return
       this.msg = st.status === 1001
         ? '手机未安装 openGym：请先安装手机 App（或用下方 IP+token 手动配对）'
         : '系统配对不可用（' + st.status + '）：用下方 IP+token 手动配对'
     } catch (e) {
-      if (pm === 'direct' || (hh && ht) || this.msg) return
+      if (this.pairMode !== 'hub' || this.busy || this.msg) return
       this.msg = '系统配对探测失败：' + e.message + '（可手动配对）'
     }
   },
@@ -141,16 +141,19 @@ export default {
     buzz('short')
   },
   async modeTap() {
+    if (this.busy) return
     // hub/直连切换：持久化选择 + 明确状态提示；清空配对码输入避免串模式
     const next = this.pairMode === 'direct' ? 'hub' : 'direct'
     this.pairMode = next
+    this.host = (await sGet(next === 'hub' ? 'hubHost' : 'host', '')).replace(/^http:\/\//, '')
     await sSet('pairMode', next)
     this.code = ''
     this.msg = next === 'direct'
       ? '已切到「直连服务器」模式：对电脑 openGym 配对'
-      : '已切到「手机 hub」模式（推荐）：对手机 openGym 配对'
+      : '已切到「手机 hub」模式：对手机 openGym 配对'
     buzz('short')
     this.rebuild()
+    this._probeIc()
   },
   tapChar(ri, ci) {
     const ch = (this.rows[ri] || [])[ci]

@@ -14,7 +14,7 @@ JSON、HTTP 解析和事件队列，全部纯 Java、零 Android 依赖——APK
   - `WatchJson.java` — 极简 JSON 解析/写出（整数 → Long；快照从不解析、原样内嵌）
   - `WatchHttp.java` — Vela 手表栈形状的请求解析 + 响应头构造
   - `WatchHub.java` — 路由与鉴权（契约常量：端口 8765、Bearer token、/spike 免鉴权回声）
-  - `WatchEventQueue.java` — 手机侧事件队列（按 id 去重追加、ack 删除、500 条上限、
+  - `WatchEventQueue.java` — 手机侧事件队列（按 id 去重追加、ack 删除、1200 条上限、
     每次变更立即落盘——队列是事件的最后一份拷贝）
 - `javatest/WatchHubTest.java` — PC JVM 测试 54 项：JSON/队列/请求解析单测 + 真实
   套接字上把契约全表打一遍（无鉴权 401、错误码、快照原样返回、重发去重、ack 语义）

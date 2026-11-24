@@ -18,10 +18,8 @@ import { newState, applySnapshot, tick, start, finish, sideUp, isExpired } from 
 const STATE_KEY = 'hubState'
 const QUEUE_KEY = 'hubQueue'
 const FLUSH_BATCH = 100
-// 队列上限（v2.1，fork 参考的边界表）：触及上限先压缩，压缩后仍超限才拒绝入队并返回
-// false（调用方继续本地训练；单用户场景下压缩后超限实际不可达，详见 docs/watch-v2/s9）。
-export const QUEUE_MAX = 200
-// 手机端收件箱另有上限（WatchEventQueue.CAP = 500，最旧优先）；两端数值互不依赖。
+const LEGACY_QUEUE_MAX = 200
+export const QUEUE_MAX = 600
 
 let lastRev = -1   // 应用存活期内的 rev 去重；-1 = 还没拉过快照
 
@@ -105,7 +103,7 @@ function _enqueue(event) {
     let next = q.concat([event])
     if (next.length > QUEUE_MAX) next = _compact(next)
     if (next.length > QUEUE_MAX) return false   // 压缩后仍超限：拒绝这条（本地状态已落盘）
-    return setJSON(QUEUE_KEY, next).then(() => true)
+    return setJSON(QUEUE_KEY, next)
   })
 }
 
@@ -135,11 +133,18 @@ export function flush() {
 }
 
 async function _flushLoop() {
+  let largeQueueSupported = false
   while (true) {
     const q = await onChain(() => getJSON(QUEUE_KEY, []))
     if (!q.length) return true
     let res = null
     try {
+      // 旧手机收件箱满时会淘汰历史事件但仍返回 ack，积压超出旧手表上限时先确认接收能力。
+      if (q.length > LEGACY_QUEUE_MAX && !largeQueueSupported) {
+        await protoPing()
+        if (!phoneSupports(3)) return false
+        largeQueueSupported = true
+      }
       res = await hubCall('POST', '/watch/events', { events: q.slice(0, FLUSH_BATCH) })
     } catch (e) {
       return false

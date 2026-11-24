@@ -102,16 +102,16 @@ test('边界表：触顶先压缩——同键 setDone 留 at 最晚一条，其�
   const now = Date.now()
   const q = [
     { id: 's', type: 'start', wid: 'w', at: now },
-    ...Array.from({ length: 150 }, (_, i) => ({ id: 'k' + i, type: 'setDone', wid: 'w', exId: '0001', entryIdx: 0, setIdx: 0, at: now + i })),
+    ...Array.from({ length: QUEUE_MAX - 2 }, (_, i) => ({ id: 'k' + i, type: 'setDone', wid: 'w', exId: '0001', entryIdx: 0, setIdx: 0, at: now + i })),
     { id: 'f', type: 'finish', wid: 'w', at: now + 500 },
-    ...Array.from({ length: 50 }, (_, i) => ({ id: 'o' + i, type: 'setDone', wid: 'w', exId: 'e' + i, entryIdx: 0, setIdx: 0, at: now })),
+    { id: 'o0', type: 'setDone', wid: 'w', exId: 'e0', entryIdx: 0, setIdx: 0, at: now },
   ]
-  await setJSON('hubQueue', q)                        // 202 条存量（超限遗留场景）
-  assert.equal(await enqueue({ id: 'k150', type: 'setDone', wid: 'w', exId: '0001', entryIdx: 0, setIdx: 0, at: now + 150 }), true)
+  await setJSON('hubQueue', q)                        // 预置超过上限的存量队列
+  assert.equal(await enqueue({ id: 'latest', type: 'setDone', wid: 'w', exId: '0001', entryIdx: 0, setIdx: 0, at: now + QUEUE_MAX }), true)
   const out = await getJSON('hubQueue', [])
   const same = out.filter(x => x.exId === '0001')     // 同键压缩成 1 条：at 最晚的胜
   assert.equal(same.length, 1)
-  assert.equal(same[0].id, 'k150')
+  assert.equal(same[0].id, 'latest')
   assert.ok(out.some(x => x.id === 's'), 'start 永不压缩')
   assert.ok(out.some(x => x.id === 'f'), 'finish 永不压缩')
   assert.equal(out.filter(x => x.exId === 'e0').length, 1)
@@ -124,6 +124,27 @@ test('边界表：压缩后仍超限才拒绝入队；拒绝时队列原样保�
   const q = await getJSON('hubQueue', [])
   assert.equal(q.length, QUEUE_MAX)
   assert.ok(!q.some(x => x.id === 'ux'))
+})
+
+test('flush：旧手机保留大队列，新手机分批确认全部事件', async () => {
+  const backlog = Array.from({ length: QUEUE_MAX }, (_, i) => ({ id: 'offline-' + i }))
+  await setJSON('hubQueue', backlog)
+  let proto = 2
+  const received = []
+  globalThis.__velaFetch = async request => {
+    if (request.method === 'GET') return { code: 200, data: { ok: true, proto } }
+    const ids = JSON.parse(request.data).events.map(event => event.id)
+    received.push(...ids)
+    return { code: 200, data: { ok: true, acked: ids } }
+  }
+  assert.equal(await flush(), false)
+  assert.deepEqual(received, [])
+  assert.deepEqual(await getJSON('hubQueue', []), backlog)
+
+  proto = 3
+  assert.equal(await flush(), true)
+  assert.deepEqual(received, backlog.map(event => event.id))
+  assert.deepEqual(await getJSON('hubQueue', []), [])
 })
 
 test('emitEvent：入队 + 触发上报（ack 后删队）；空事件 false 不发包', async () => {

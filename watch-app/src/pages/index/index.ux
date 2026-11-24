@@ -7,7 +7,7 @@
 
     <div class="card" if="{{ !hasSetup }}">
       <text class="c-t">尚未配对</text>
-      <text class="c-s">先在手机 openGym App 里确认常驻通知（IP 与 token），再到手表上完成配对。</text>
+      <text class="c-s">在电脑上的 openGym 生成配对码，或连接手机 openGym App。</text>
       <text class="btn-main" onclick="goPair">开始配对</text>
     </div>
 
@@ -104,7 +104,10 @@ export default {
             this.pendingN = 0
             this.syncMsg = '待同步训练已全部补投 ✓'
           })
-          .then(done, done)
+          .catch(async () => {
+            this.pendingN = (await getJSON('pending', [])).length
+          })
+          .then(done)
       } else {
         done()
       }

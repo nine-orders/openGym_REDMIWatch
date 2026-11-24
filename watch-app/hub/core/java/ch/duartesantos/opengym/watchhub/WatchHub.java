@@ -65,11 +65,10 @@ public final class WatchHub {
 
         if ("/watch/ping".equals(path)) {
             if (!get) return err(405, "method_not_allowed");
-            // `proto` is the hub protocol version (2 = rest events + the snapshot's rest stamp,
-            // docs/watch-v2/s9). An older watch app ignores the extra field; a newer watch app
-            // treats a missing field as version 1 and keeps those events to itself.
+            // v2 supports rest events; v3 can accept the larger watch outbox
+            // and leaves excess events unacknowledged when its inbox is full.
             return WatchHttp.json(200, "{\"ok\":true,\"server\":\"hub\",\"rev\":" + env.snapshotRev()
-                + ",\"time\":" + System.currentTimeMillis() + ",\"proto\":2}");
+                + ",\"time\":" + System.currentTimeMillis() + ",\"proto\":3}");
         }
 
         if ("/watch/snapshot".equals(path)) {
