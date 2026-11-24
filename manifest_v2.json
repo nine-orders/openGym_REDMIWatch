@@ -3,7 +3,7 @@
     "id": "ch.duartesantos.opengym",
     "restype": "quick_app",
     "name": "开炼",
-    "description": "给 REDMI Watch 5 用的 openGym 力量训练记录工具。电脑需运行支持手表配对的 openGym 版本。首次在同一局域网内配对，将多套动作单下载到手表。训练时可离线选计划、记录重量和次数、使用组间休息计时。恢复连接后，打开手表应用即可将待同步记录补传到电脑。手表端也可切换到手机配对，需配合支持 Watch Hub 的 Android 版 openGym。",
+    "description": "「开炼」是通过 Vibe Coding（AI 辅助编程）开发的 REDMI Watch 5 快应用，用于记录 openGym 力量训练。电脑需运行支持手表配对的 openGym 版本。首次在同一局域网内配对，将多套动作单下载到手表。训练时可离线选计划、记录重量和次数、使用组间休息计时。恢复连接后，打开手表应用即可将待同步记录补传到电脑。手表端也可切换到手机配对，需配合支持 Watch Hub 的 Android 版 openGym。",
     "preview": ["astrobox/training.png"],
     "icon": "watch-app/src/icon.png",
     "cover": "astrobox/cover.png"
