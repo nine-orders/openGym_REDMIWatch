@@ -1,6 +1,8 @@
 # 安装包与历史版本
 
-当前首页验收候选为手表 **1.0.10 / 11**，修复动作单列表无法上下滑动。安卓侧配套沿用 1.0.8 修复 APK（显示版本 1.4.3，内部版本号 30）。两端沿用原正式签名。手表 1.0.9 / 10、1.0.8 / 9 及 1.0.7 安装包保存在各自目录。[1.0.10 安装包](../watch-app/dist/routine-scroll-1.0.10/openGym-RedmiWatch5-LTNS-1.0.10.rpk) · [首页实施记录](watch-home-v4-20261126.md) · [手机同步修复记录](phone-sync-fix-20261126.md)
+当前手表版本为 **1.0.10 / 11**，修复动作单列表无法上下滑动。安卓侧配套沿用 1.0.8 修复 APK（显示版本 1.4.3，内部版本号 30）。两端沿用原正式签名。手表 1.0.9 / 10、1.0.8 / 9 及 1.0.7 安装包保存在本机各自目录。[下载 1.0.10 正式签名 RPK](https://raw.githubusercontent.com/nine-orders/openGym_REDMIWatch/e76842b28d59491e3a7860058882f690ddcf50fa/astrobox/openGym-RedmiWatch5-LTNS-1.0.10.rpk) · [首页实施记录](watch-home-v4-20261126.md) · [手机同步修复记录](phone-sync-fix-20261126.md)
+
+开炼 1.0.10 已按免费快应用提交 AstroBox 官方源审核，适配红米 Watch 5（`xmrw5`）。[资源清单](https://github.com/nine-orders/openGym_REDMIWatch/blob/e76842b28d59491e3a7860058882f690ddcf50fa/manifest_v2.json) · [AstroBox 审核 PR #2493](https://github.com/AstralSightStudios/AstroBox-Repo/pull/2493)
 
 ## 历史归档
 
