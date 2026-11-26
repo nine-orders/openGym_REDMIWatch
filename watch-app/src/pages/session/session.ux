@@ -18,12 +18,11 @@
 
       <text class="lab">重量 {{ unit }}</text>
       <div class="steprow">
-        <text class="step" onclick="wStep(-25)">-2.5</text>
-        <text class="step" onclick="wStep(-5)">-.5</text>
-        <text class="bigv" if="{{ dispW > 0 }}">{{ dispW }}</text>
-        <text class="bigv" if="{{ dispW <= 0 }}">自重</text>
-        <text class="step" onclick="wStep(5)">+.5</text>
-        <text class="step" onclick="wStep(25)">+2.5</text>
+        <text class="step weight-step" onclick="wStep(-25)">-2.5</text>
+        <text class="step weight-step" onclick="wStep(-5)">-.5</text>
+        <text class="weight-value">{{ dispW > 0 ? dispW : '自重' }}</text>
+        <text class="step weight-step" onclick="wStep(5)">+.5</text>
+        <text class="step weight-step" onclick="wStep(25)">+2.5</text>
       </div>
 
       <text class="lab">{{ modeSec ? '秒数' : '次数' }}</text>
@@ -38,6 +37,7 @@
         <text class="btn-sec" onclick="prevEx">上一动作</text>
         <text class="btn-sec" onclick="nextEx">下一动作</text>
       </div>
+      <text class="warn" if="{{ storageError }}">{{ storageError }}</text>
       <text class="link-end" onclick="endTap">结束训练</text>
     </div>
 
@@ -68,7 +68,7 @@
       </scroll>
       <text class="btn-main" if="{{ saveState !== 1 }}" onclick="saveTap">{{ busy ? '同步中…' : (saveState === 2 ? '重试同步' : '保存并同步') }}</text>
       <text class="ok" if="{{ saveState === 1 }}">已同步到 openGym ✓</text>
-      <text class="warn" if="{{ saveState === 2 && syncMsg }}">未同步：{{ syncMsg }}</text>
+      <text class="warn" if="{{ syncMsg }}">{{ syncMsg }}</text>
       <div class="row2">
         <text class="btn-sec" onclick="goHome">返回</text>
         <text class="btn-sec danger" if="{{ saveState !== 1 }}" onclick="quitTap">{{ confirmQuit ? '再点一次确认丢弃' : '丢弃本次' }}</text>
@@ -80,7 +80,10 @@
 <script>
 import router from '@system.router'
 import { getJSON, setJSON, buzz } from '../../js/store'
-import { buildSession, totals, toWorkout, queueOrPush, heartbeat, heartbeatEnd } from '../../js/session'
+import { buildCachedPhoneSession, buildSession, totals, toWorkout, queueOrPush, heartbeat, heartbeatEnd } from '../../js/session'
+import { connectionOwner, readConnection, readDevice } from '../../js/connections'
+import { getPreferences } from '../../js/preferences'
+import { HUB_STATE_KEY, readyChoices } from '../../js/plan-choices'
 
 const pad = n => (n < 10 ? '0' + n : '' + n)
 const fmtW = n => Math.round((Number(n) || 0) * 10) / 10
@@ -115,29 +118,40 @@ export default {
     busy: false,
     saveState: 0,
     syncMsg: '',
-    confirmQuit: false
+    confirmQuit: false,
+    vibrateAtRestEnd: true,
+    storageError: ''
   },
 
   async onInit() {
+    const prefs = await getPreferences()
+    this.vibrateAtRestEnd = prefs.vibrate
     let s = await getJSON('active', null)
     if (!(s && s.entries && s.entries.length)) {
-      // index「开始训练」经路由参数传今天该练的；「选动作单」页落到 startRid。
-      // startRid 由 pick 页 setJSON 写入，这里必须用 getJSON 读（v1 用 sGet 读到
-      // 带引号的 JSON 串，粘性值从未匹配上过）。
+      // The selected routine is passed explicitly; retain the legacy stored fallback.
       const rid = this.rid || (await getJSON('startRid', ''))
-      const plan = await getJSON('plan', null)
-      if (!plan || !plan.routines || !plan.routines.length) {
-        this.err = '无可用计划：请先在网页端添加动作单，再到手表配对拉取'
-        this.ready = true
-        return
+      if (this.phonePlanId) {
+        const cache = await getJSON('phonePlan', null) || await getJSON(HUB_STATE_KEY, null)
+        const chosen = readyChoices(cache).find(item => item.id === this.phonePlanId)
+        if (chosen) s = buildCachedPhoneSession(cache, chosen.session)
+      } else {
+        const plan = await getJSON('plan', null)
+        if (plan && plan.routines && (!this.rid || plan.routines.some(r => r.id === this.rid))) {
+          s = buildSession(plan, rid)
+          if (s) s.owner = plan.owner === undefined ? connectionOwner(await readConnection('direct')) : plan.owner
+        }
       }
-      s = buildSession(plan, rid)
       if (!s || !s.entries.length) {
-        this.err = '动作单里没有动作'
+        this.err = '无可用计划，请回首页重新选择或连接设备下载动作单。'
         this.ready = true
         return
       }
-      await setJSON('active', s)
+      if (prefs.restSec !== null) s.restSec = prefs.restSec
+      if (!await setJSON('active', s)) {
+        this.err = '手表存储不足或不可写，请同步已有记录后重试。'
+        this.ready = true
+        return
+      }
     }
     this.s = s
     this.unit = s.unit || 'kg'
@@ -211,7 +225,7 @@ export default {
     this.restTxt = pad(Math.floor(sec / 60)) + ':' + pad(sec % 60)
     this.restBar = Math.round(100 * (1 - left / (this.restTotal * 1000)))
     if (left <= 0) {
-      buzz('long')
+      if (this.vibrateAtRestEnd) buzz('long')
       this.phase = 'train'
       this.refresh()
     }
@@ -235,16 +249,25 @@ export default {
   },
 
   // ---------- 完成一组 ----------
-  doneTap() {
+  async doneTap() {
     if (!this.s || this.busy) return
     const en = this.s.entries[this.exI]
     const set = en.sets[this.setI]
     if (!set.done) {
+      this.busy = true
+      this.storageError = ''
+      const before = { ...set }
       set.w = Math.max(0, fmtW(this.dispW))
       set.r = Math.max(1, Math.round(this.dispR))
       set.done = true
       set.ts = Date.now()
-      setJSON('active', this.s)
+      const saved = await setJSON('active', this.s)
+      this.busy = false
+      if (!saved) {
+        Object.assign(set, before)
+        this.storageError = '本组未保存，请同步后重试。'
+        return
+      }
       buzz('short')
       const t = totals(this.s)
       heartbeat(this.s, t.done, t.total, this.exI)
@@ -256,10 +279,13 @@ export default {
     if (!pos) { this.enterSummary(); return }
     this.exI = pos[0]
     this.setI = pos[1]
-    this.phase = 'rest'
-    this.restTotal = this.s.entries[this.exI].rs || this.s.restSec || 90
-    this.restEndAt = Date.now() + this.restTotal * 1000
-    this.tickRest()
+    const rs = this.s.entries[this.exI].rs
+    this.restTotal = rs == null ? (this.s.restSec == null ? 90 : this.s.restSec) : rs
+    if (this.restTotal > 0) {
+      this.phase = 'rest'
+      this.restEndAt = Date.now() + this.restTotal * 1000
+      this.tickRest()
+    } else this.phase = 'train'
     this.refresh()
   },
 
@@ -287,7 +313,7 @@ export default {
   },
 
   // ---------- 结束 / 保存 ----------
-  endTap() { this.enterSummary() },
+  endTap() { if (!this.busy) this.enterSummary() },
   enterSummary() {
     const s = this.s
     const t = totals(s)
@@ -305,29 +331,35 @@ export default {
     this.phase = 'summary'
     this.saveState = 0
     this.syncMsg = ''
-    setJSON('active', s)
   },
   async saveTap() {
     if (this.busy || !this.s) return
     this.busy = true
     try {
       const w = toWorkout(this.s)
-      const res = await queueOrPush(w)
-      heartbeatEnd()
-      await setJSON('active', null)
+      const device = await readDevice()
+      const connection = device.mode === 'direct' ? (device.connection || await readConnection('direct')) : null
+      const res = await queueOrPush(w, connection, !!connection, async () => {
+        const active = await getJSON('active', null)
+        if (active && active.id === this.s.id && !await setJSON('active', null)) {
+          throw new Error('训练已保存，结束状态未能写入，请重试')
+        }
+        heartbeatEnd(this.s)
+      })
       this.saveState = res.synced ? 1 : 2
-      this.syncMsg = res.error || ''
+      this.syncMsg = res.synced ? '' : res.error === '已保存在手表' ? res.error : '已保存 · ' + (res.error || '稍后重试同步')
       if (res.synced) buzz('long')
     } catch (e) {
       this.saveState = 2
-      this.syncMsg = e.message
+      this.syncMsg = e.message || '保存失败，请重试'
     }
     this.busy = false
   },
-  quitTap() {
+  async quitTap() {
+    if (this.busy) return
     if (this.confirmQuit) {
-      setJSON('active', null)
-      this.goHome()
+      if (await setJSON('active', null)) this.goHome()
+      else this.syncMsg = '未能写入手表，请重试'
       return
     }
     this.confirmQuit = true
@@ -335,6 +367,7 @@ export default {
     setTimeout(() => { self.confirmQuit = false }, 3000)
   },
   goHome() {
+    if (this.busy) return
     try { router.replace({ uri: '/pages/index' }) } catch (e) { router.back() }
   }
 }
@@ -374,6 +407,10 @@ export default {
 }
 .wide { width: 108px; }
 .bigv { font-size: 46px; color: #ffffff; font-weight: bold; }
+.weight-step { width: 60px; }
+.weight-value {
+  width: 120px; font-size: 36px; color: #ffffff; font-weight: bold; text-align: center;
+}
 
 .btn-main {
   height: 82px; line-height: 82px; text-align: center;

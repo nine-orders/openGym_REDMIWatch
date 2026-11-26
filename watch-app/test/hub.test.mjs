@@ -96,6 +96,46 @@ test('flush：空队列直接 true 不发包；HTTP 错误静默保留队列', a
   assert.equal((await getJSON('hubQueue', [])).length, 1)
 })
 
+test('hub HTTP 无任何回调时 GET/POST 有界超时；待发事件不丢，恢复后可重发', async () => {
+  globalThis.__hubHttpTimeout = 20
+  globalThis.__velaFetch = () => new Promise(() => {})
+  try {
+    // Fail quickly if production never settles the request.
+    const bounded = promise => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('request did not settle')), 100))])
+    await assert.rejects(bounded(ping()), e => e.code === 204)
+    await enqueue({ id: 'timeout-event', type: 'finish' })
+    assert.equal(await bounded(flush()), false)
+    assert.deepEqual((await getJSON('hubQueue', [])).map(e => e.id), ['timeout-event'])
+    globalThis.__velaFetch = async () => ({ code: 200, data: { ok: true, acked: ['timeout-event'] } })
+    assert.equal(await flush(), true)
+    assert.deepEqual(await getJSON('hubQueue', []), [])
+  } finally { delete globalThis.__hubHttpTimeout }
+})
+
+test('手机重启后立即发了新快照：新 epoch 的较低 rev 仍被采纳；旧 epoch 迟到不复活训练', async () => {
+  let response = { ok: true, epoch: 'old', rev: 99, snapshot: activeSnapshot('old-workout') }
+  globalThis.__velaFetch = async () => ({ code: 200, data: response })
+  assert.equal((await syncSnapshot()).state.workout.id, 'old-workout')
+  response = { ok: true, epoch: 'new', rev: 1, snapshot: readySnapshot() }
+  assert.equal((await syncSnapshot()).changed, true)
+  assert.equal((await loadState()).workout, null)
+  response = { ok: true, epoch: 'old', rev: 100, snapshot: activeSnapshot('old-workout') }
+  assert.equal((await syncSnapshot()).changed, false)
+  assert.equal((await loadState()).workout, null)
+})
+
+test('并发拉取：更旧的快照不能覆盖已经收到的结束状态', async () => {
+  const responses = [
+    { ok: true, epoch: 'same', rev: 2, snapshot: readySnapshot() },
+    { ok: true, epoch: 'same', rev: 1, snapshot: activeSnapshot('late-workout') }
+  ]
+  globalThis.__velaFetch = async () => ({ code: 200, data: responses.shift() })
+  const results = await Promise.all([syncSnapshot(), syncSnapshot()])
+  assert.equal(results[0].changed, true)
+  assert.equal(results[1].changed, false)
+  assert.equal((await loadState()).workout, null)
+})
+
 // —— v2.1 边界表（docs/watch-v2/s9）：队列上限、压缩、拒绝溢出 ——
 
 test('边界表：触顶先压缩——同键 setDone 留 at 最晚一条，其余类型不丢', async () => {
@@ -106,7 +146,7 @@ test('边界表：触顶先压缩——同键 setDone 留 at 最晚一条，其�
     { id: 'f', type: 'finish', wid: 'w', at: now + 500 },
     { id: 'o0', type: 'setDone', wid: 'w', exId: 'e0', entryIdx: 0, setIdx: 0, at: now },
   ]
-  await setJSON('hubQueue', q)                        // 预置超过上限的存量队列
+  await setJSON('hubQueue', q.map(event => ({ ...event, owner: JSON.stringify(['127.0.0.1:8765', 'stub-token']) })))
   assert.equal(await enqueue({ id: 'latest', type: 'setDone', wid: 'w', exId: '0001', entryIdx: 0, setIdx: 0, at: now + QUEUE_MAX }), true)
   const out = await getJSON('hubQueue', [])
   const same = out.filter(x => x.exId === '0001')     // 同键压缩成 1 条：at 最晚的胜
@@ -433,7 +473,8 @@ test('S8 ic：ping/快照/事件全走系统通道（HTTP 桩不碰）；事件�
 
 test('S8 ic：非 2xx 透传错误码（401）；对端不应答按超时拒绝、队列原样保留', async () => {
   await icPair()
-  globalThis.__icReply = async m => ({ id: m.id, status: 401, body: { ok: false, error: 'unauthorized' } })
+  // Android replies carry the UTF-8 JSON as a string, not an embedded object.
+  globalThis.__icReply = async m => ({ id: m.id, status: 401, body: '{"ok":false,"error":"unauthorized"}' })
   await assert.rejects(() => ping(), e => e.code === 401 && e.message === 'unauthorized')
 
   globalThis.__icReply = undefined                 // 手机失联：只发不应答 → 超时
@@ -441,6 +482,14 @@ test('S8 ic：非 2xx 透传错误码（401）；对端不应答按超时拒绝�
   assert.equal(await flush(), false)
   assert.deepEqual((await getJSON('hubQueue', [])).map(x => x.id), ['ic2'])
   cleanIc()
+})
+
+test('S8 ic：旧手机错误地只返回 OK 时明确报响应异常，不当成已连接', async () => {
+  await icPair()
+  try {
+    globalThis.__icReply = async m => ({ id: m.id, status: 200, body: 'OK' })
+    await assert.rejects(ping(), e => e.code === 502 && /JSON/.test(e.message))
+  } finally { cleanIc() }
 })
 
 // —— S10 会话过期（docs/watch-v2/s10）——

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 390 474" width="780" height="948" role="img" aria-labelledby="title desc">
+  <title id="title">openGym 开炼 · 手表首页 V5</title>
+  <desc id="desc">品牌统一版：首页含配对入口、独立训练、同步手机以及待同步训练记录。</desc>
+  <defs>
+    <clipPath id="app-icon"><rect x="29" y="29" width="54" height="54" rx="12"/></clipPath>
+    <style>
+      text {font-family: 'Microsoft YaHei','PingFang SC','Noto Sans CJK SC',sans-serif; dominant-baseline:middle;}
+      .bold {font-weight:700;}
+      .line {fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;}
+    </style>
+    <g id="phone" class="line"><rect x="5" y="2" width="14" height="20" rx="3"/><path d="M10 18h4"/></g>
+    <g id="chevron" class="line"><path d="m9 6 6 6-6 6"/></g>
+    <g id="dumbbell" class="line"><path d="M6 4v16M18 4v16M3 8v8M21 8v8M6 12h12M3 12H1m20 0h2"/></g>
+    <g id="upload" class="line"><path d="M6 18a5 5 0 0 1-1-9.9A7 7 0 0 1 18 7a5 5 0 0 1 1 10h-2M12 21V10m-4 4 4-4 4 4"/></g>
+    <g id="settings" class="line"><path d="m10 2-.7 3-2.1 1.2-3-.9-2 3.5 2.2 2v2.4l-2.2 2 2 3.5 3-.9L9.3 19l.7 3h4l.7-3 2.1-1.2 3 .9 2-3.5-2.2-2v-2.4l2.2-2-2-3.5-3 .9L14.7 5 14 2z"/><circle cx="12" cy="12" r="3.3"/></g>
+  </defs>
+  <!-- Watch display concept, not a device-resolution production screen. -->
+  <rect x="2" y="2" width="386" height="470" rx="42" fill="#343437"/>
+  <rect x="9" y="9" width="372" height="456" rx="36" fill="#090909"/>
+  <rect x="29" y="29" width="54" height="54" rx="12" fill="#FFD23F"/>
+  <image x="29" y="29" width="54" height="54" href="../../watch-app/src/icon.png" xlink:href="../../watch-app/src/icon.png" clip-path="url(#app-icon)" preserveAspectRatio="xMidYMid meet"/>
+  <text x="96" y="45" fill="#FFFFFF" font-size="25" class="bold">openGym</text>
+  <text x="97" y="69" fill="#A0A0A0" font-size="15">开炼</text>
+  <g transform="translate(326 40) scale(1.18)" color="#999999"><use href="#settings" xlink:href="#settings"/></g>
+  <!-- Connection and pairing management -->
+  <g transform="translate(29 104) scale(.92)" color="#8ED5A0"><use href="#phone" xlink:href="#phone"/></g>
+  <text x="56" y="115" fill="#8ED5A0" font-size="16">手机已连接</text>
+  <text x="311" y="115" fill="#999999" font-size="15" text-anchor="end">切换</text>
+  <g transform="translate(326 103)" color="#999999"><use href="#chevron" xlink:href="#chevron"/></g>
+  <!-- Independent workout -->
+  <rect x="29" y="142" width="332" height="146" rx="19" fill="#FFD23F"/>
+  <g transform="translate(48 159) scale(1.4)" color="#201A10"><use href="#dumbbell" xlink:href="#dumbbell"/></g>
+  <path d="M324 181l14-14m-10 0h10v10" fill="none" stroke="#201A10" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="49" y="225" fill="#201A10" font-size="28" class="bold">独立训练</text>
+  <text x="49" y="260" fill="#6F5318" font-size="17">选择动作单</text>
+  <!-- Join the phone workout only on explicit user selection. -->
+  <rect x="29" y="301" width="332" height="87" rx="19" fill="#242424"/>
+  <g transform="translate(47 327) scale(1.42)" color="#FF7819"><use href="#phone" xlink:href="#phone"/></g>
+  <text x="98" y="328" fill="#FFFFFF" font-size="23" class="bold">同步手机</text>
+  <circle cx="103" cy="357" r="4" fill="#FF993F"/>
+  <text x="115" y="358" fill="#FF993F" font-size="16">手机训练中</text>
+  <g transform="translate(326 332)" color="#999999"><use href="#chevron" xlink:href="#chevron"/></g>
+  <!-- Pending sync is counted by workout sessions, not protocol events. -->
+  <path d="M29 407H361" stroke="#303030" stroke-width="1"/>
+  <g transform="translate(30 425)" color="#F0B46C"><use href="#upload" xlink:href="#upload"/></g>
+  <text x="64" y="437" fill="#F0B46C" font-size="18">3 场训练待同步</text>
+  <g transform="translate(326 425)" color="#F0B46C"><use href="#chevron" xlink:href="#chevron"/></g>
+</svg>

@@ -3,7 +3,7 @@
 // Bug 1（onInit 调 firstUndoneAfter(-1,-1) 抛 TypeError，页面永远停在"载入中"）与
 // Bug 3（index 的粘性 startRid 覆盖"今天该练的"），以及训练主流程的页面级行为。
 import './register.mjs'
-import { test, beforeEach } from 'node:test'
+import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -13,7 +13,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SRC = path.resolve(HERE, '..', 'src')
 
 // 与 pages.test.mjs 相同的方式把 .ux 的 script 生成到 .gen/ 下再导入
-const PAGES = [['pages/index', 'index'], ['pages/pair', 'pair'], ['pages/pick', 'pick'], ['pages/session', 'session'], ['pages/session2', 'session2'], ['pages/spike', 'spike']]
+const manifest = JSON.parse(fs.readFileSync(path.join(SRC, 'manifest.json'), 'utf8'))
+const PAGES = Object.entries(manifest.router.pages).map(([key, page]) => [key, page.component])
 const comps = {}
 for (const [key, file] of PAGES) {
   const raw = fs.readFileSync(path.join(SRC, key, file + '.ux'), 'utf8')
@@ -27,6 +28,10 @@ for (const [key, file] of PAGES) {
 const { sGet, sSet, getJSON, setJSON } = await import('../src/js/store')
 const { buildPlanCache, todayISO } = await import('../src/js/session')
 const { forgetRev, loadState } = await import('../src/js/hub')
+const homePages = []
+afterEach(() => {
+  for (const p of homePages.splice(0)) if (p.onHide) p.onHide()
+})
 
 beforeEach(() => {
   globalThis.__velaStore = new Map()
@@ -40,6 +45,7 @@ beforeEach(() => {
 function mount(comp, params = {}) {
   const inst = Object.create(comp)
   Object.assign(inst, JSON.parse(JSON.stringify(comp.data || {})), params)
+  if (comp === comps.index) homePages.push(inst)
   return inst
 }
 
@@ -129,7 +135,7 @@ test('session 主流程：完成一组 → 休息倒计时用动作专属 rs（B
 
   p.dispW = 22.5
   p.dispR = 8
-  p.doneTap()
+  await p.doneTap()
   assert.equal(p.s.entries[0].sets[0].done, true)
   assert.deepEqual(p.s.entries[0].sets[0], { w: 22.5, r: 8, done: true, ts: p.s.entries[0].sets[0].ts })
   assert.equal(p.phase, 'rest')
@@ -152,7 +158,7 @@ test('session 结束与保存：总结页数据正确，断网保存进待发队
   await seedPlan()
   const p = mount(comps.session)
   await p.onInit()
-  p.doneTap()
+  await p.doneTap()
   p.endTap()
   assert.equal(p.phase, 'summary')
   assert.equal(p.sumSets, 1)
@@ -169,7 +175,7 @@ test('session 结束与保存：总结页数据正确，断网保存进待发队
   await seedPlan()
   const p2 = mount(comps.session)
   await p2.onInit()
-  p2.doneTap(); p2.endTap()
+  await p2.doneTap(); p2.endTap()
   globalThis.__velaFetch = async opts => (
     opts.method === 'PUT' ? { code: 200, data: { ok: true } } : { code: 200, data: { state: { workouts: [] }, rev: 1 } }
   )
@@ -190,34 +196,49 @@ test('session 丢弃：quitTap 两次确认，清 active 回主页', async () =>
   assert.deepEqual(globalThis.__routes, [{ way: 'replace', uri: '/pages/index' }])
 })
 
-// ---------- index 页 ----------
-
-test('index onShow：展示服务器/待同步/今日动作单；今日动作单按 dayPlan > 队列 > 周计划', async () => {
-  await sSet('host', '192.168.1.10:8080')
-  await sSet('token', 'tok')
+test('手表存储写满时拒绝确认保存，进行中的记录仍可重试', async () => {
+  await sSet('host', '127.0.0.1:8080')
+  await sSet('token', 'original')
   await seedPlan()
-  const p = mount(comps.index)
-  await p.onShow()
-  assert.equal(p.hasSetup, true)
-  assert.equal(p.host, '192.168.1.10:8080')
-  assert.equal(p.todayName, '推日') // 队列 ['r1']
-
-  const dow = String(new Date().getDay())
-  await seedPlan({ queue: null, week: { [dow]: ['r2'] } })
-  const p2 = mount(comps.index)
-  await p2.onShow()
-  assert.equal(p2.todayName, '腿日')
+  const p = mount(comps.session, { rid: 'r1' })
+  await p.onInit()
+  await p.doneTap()
+  p.endTap()
+  const storage = globalThis.__velaStore
+  const write = storage.set.bind(storage)
+  storage.set = (key, val) => {
+    if (key === 'pending') throw new Error('full')
+    return write(key, val)
+  }
+  await p.saveTap()
+  assert.match(p.syncMsg, /存储写入失败/)
+  assert.equal((await getJSON('active', null)).entries[0].sets[0].done, true)
+  assert.deepEqual(await getJSON('pending', []), [])
 })
 
-test('index startTap：按今日计划经 params 传目标，粘性 startRid 不再覆盖（Bug 3）', async () => {
+// ---------- index 页 ----------
+
+test('首页区分电脑离线和未配对，保留真实待同步场数', async () => {
+  const p = mount(comps.index)
+  await p.onShow()
+  assert.equal(p.deviceLabel, '未配对')
+  await sSet('host', '192.168.1.10:8080')
+  await sSet('token', 'tok')
+  await p.onShow()
+  assert.equal(p.deviceLabel, '电脑离线 · 已保存连接')
+  assert.equal(p.pendingLabel, '已全部同步')
+  await setJSON('pending', [{ id: 'p1', entries: [] }])
+  await p.onShow()
+  assert.match(p.pendingLabel, /1 场待同步/)
+})
+
+test('index startTap：电脑有今日安排也先打开选单，不自动开练', async () => {
   await seedPlan()
   await setJSON('startRid', 'r2') // 两天前手动挑过腿日，粘着
   const p = mount(comps.index)
   await p.startTap()
-  assert.equal(globalThis.__routes.length, 1)
-  assert.equal(globalThis.__routes[0].uri, '/pages/session')
-  assert.equal(globalThis.__routes[0].params.rid, 'r1') // 今天该练的（队列第一项），不是粘性 r2
-  // 开局不写粘性值：startRid 只属于「选动作单」页的手动挑选
+  assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/pick', params: { mode: 'independent' } }])
+  assert.equal(await getJSON('active', null), null)
   assert.equal(await getJSON('startRid', ''), 'r2')
 })
 
@@ -226,7 +247,7 @@ test('index startTap：rest 日落到选动作单页；有未结束会话时直�
   await seedPlan({ dayPlan: { [today]: 'rest' }, queue: null })
   const p = mount(comps.index)
   await p.startTap()
-  assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/pick' }])
+  assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/pick', params: { mode: 'independent' } }])
 
   await seedPlan()
   const active = {
@@ -236,16 +257,15 @@ test('index startTap：rest 日落到选动作单页；有未结束会话时直�
   await setJSON('active', active)
   const p2 = mount(comps.index)
   await p2.onShow() // 真实页面里 active 由 onShow 填充
-  assert.equal(p2.active.id, 's1')
+  assert.equal(p2.independentActive, true)
   await p2.startTap()
   assert.deepEqual(globalThis.__routes.slice(1), [{ way: 'push', uri: '/pages/session' }]) // 续训不传 rid
 })
 
-test('index startTap：本地无计划给可读提示', async () => {
+test('index startTap：本地无计划仍打开选单，显示空态', async () => {
   const p = mount(comps.index)
   await p.startTap()
-  assert.match(p.syncMsg, /本地无计划/)
-  assert.deepEqual(globalThis.__routes, [])
+  assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/pick', params: { mode: 'independent' } }])
 })
 
 test('index onShow：已配对时后台静默刷新计划缓存——网页端练完胸，手表指向肩', async () => {
@@ -264,7 +284,9 @@ test('index onShow：已配对时后台静默刷新计划缓存——网页端�
   await p._refresh
   const fresh = await getJSON('plan', null)
   assert.deepEqual(fresh.queueDoneIds, ['r1'])   // 网页端练完的胸日已按 DONE RULE 计入
-  assert.equal(p.todayName, '腿日')              // 「开始训练」指向肩日，不再永远胸日
+  const pick = mount(comps.pick, { mode: 'independent' })
+  await pick.onShow()
+  assert.equal(pick.todayRid, 'r2')
 })
 
 test('index onShow：断网时刷新失败静默，沿用本地缓存', async () => {
@@ -276,7 +298,7 @@ test('index onShow：断网时刷新失败静默，沿用本地缓存', async ()
   await p.onShow()
   await p._refresh                                // __velaFetch 未注入 = 断网
   assert.deepEqual(await getJSON('plan', null), before)
-  assert.equal(p.todayName, '推日')
+  assert.match(p.deviceLabel, /电脑离线/)
 })
 
 // ---------- pick 页 ----------
@@ -286,14 +308,17 @@ test('pick：onShow 列出动作单并标今日；pick 持久化 startRid 并进
   const p = mount(comps.pick)
   await p.onShow()
   assert.deepEqual(p.routines, [
-    { id: 'r1', name: '推日', exN: 1 },
-    { id: 'r2', name: '腿日', exN: 1 }
+    { id: 'r1', name: '推日', exN: 1, origin: '' },
+    { id: 'r2', name: '腿日', exN: 1, origin: '' }
   ])
   assert.equal(p.todayRid, 'r1') // 队列第一项标「今日」
 
   await p.pick(1)
   assert.equal(await getJSON('startRid', ''), 'r2') // 持久化的是手动挑的腿日
-  assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/session' }])
+  assert.deepEqual(globalThis.__routes, [{ way: 'replace', uri: '/pages/session', params: { rid: 'r2' } }])
+  const s = mount(comps.session, globalThis.__routes[0].params)
+  await s.onInit()
+  assert.equal(s.s.routineId, 'r2')
 })
 
 test('pick：空计划显示空态提示', async () => {
@@ -304,21 +329,87 @@ test('pick：空计划显示空态提示', async () => {
   assert.equal(p.todayRid, '')
 })
 
-// ---------- pair 页（S4：hub 配对） ----------
+// ---------- 手表配对 ----------
 
-test('pair onShow：host 优先取 hubHost 并去 http:// 前缀；键盘按页签重建', async () => {
+test('pair 电脑配对：先检查 IP，再进入配对码步骤，返回修改 IP 时保留配对码', async () => {
+  const p = mount(comps.pair)
+  await p.onShow()
+  await p.selectDevice('direct')
+  p.host = '192.168.1.300'
+  p.nextTap()
+  assert.equal(p.stage, 'host')
+  assert.match(p.msg, /IP/)
+  p.host = '192.168.1.10'
+  p.nextTap()
+  assert.equal(p.stage, 'code')
+  p.code = 'ABCD2345'
+  p.backTap()
+  assert.equal(p.stage, 'host')
+  assert.equal(p.host, '192.168.1.10')
+  p.nextTap()
+  assert.equal(p.code, 'ABCD2345')
+})
+
+test('pair 手机自动连接不可用：保留原电脑模式并提供可编辑的手动入口', async () => {
+  await sSet('pairMode', 'direct')
+  globalThis.__icDiag = 1001
+  try {
+    const p = mount(comps.pair)
+    await p.onShow()
+    await p.selectDevice('hub')
+    assert.equal(p.stage, 'phone')
+    assert.equal(p.autoTitle, '没找到手机 openGym')
+    assert.match(p.autoHelp, /配套安卓版/)
+    p.manualTap()
+    assert.equal(p.stage, 'host')
+    assert.equal(p.host, '')
+    assert.equal(await sGet('pairMode', ''), 'direct')
+  } finally {
+    globalThis.__icDiag = undefined
+  }
+})
+
+test('pair 手动配对失败：已有连接和离线动作单可继续使用', async () => {
+  await sSet('pairMode', 'direct')
+  await sSet('host', '192.168.1.10:8080')
+  await sSet('token', 'old-pc-token')
+  await sSet('hubHost', '192.168.1.20')
+  await sSet('hubToken', '12345678')
+  await seedPlan()
+  const plan = await sGet('plan', '')
+  globalThis.__velaFetch = async opts => opts.url.endsWith('/api/pair/redeem')
+    ? { code: 400, data: { error: 'code_expired' } }
+    : { code: 401, data: { error: 'unauthorized' } }
+  const p = mount(comps.pair)
+  p.host = '192.168.1.30'
+  p.code = 'ABCD2345'
+  await p.pairTap()
+  assert.equal(await sGet('host', ''), '192.168.1.10:8080')
+  assert.equal(await sGet('token', ''), 'old-pc-token')
+  assert.equal(await sGet('plan', ''), plan)
+  p.pairMode = 'hub'
+  p.code = '13572468'
+  await p.pairTap()
+  assert.equal(await sGet('hubHost', ''), '192.168.1.20')
+  assert.equal(await sGet('hubToken', ''), '12345678')
+  assert.equal(await sGet('pairMode', ''), 'direct')
+})
+
+test('pair 手动连接手机：沿用 IP，两个步骤各用对应的数字键盘', async () => {
   await sSet('hubHost', 'http://192.168.1.20')
   await sSet('hubToken', '12345678')
   const p = mount(comps.pair)
   await p.onShow()
+  await p.selectDevice('hub')
+  await p.startPairing()
+  p.manualTap()
   assert.equal(p.host, '192.168.1.20')
-  assert.equal(p.rows.length, 2) // '1234567890.:' 12 个按 6 个一行
-
-  p.setTab('code')
-  assert.equal(p.tab, 'code')
-  assert.equal(p.rows.length, 2) // 10 个数字按 6 个一行（hub token 是 8 位数字）
+  assert.deepEqual(p.rows.flat(), '123456789.0:'.split(''))
+  p.nextTap()
+  assert.equal(p.stage, 'code')
+  assert.deepEqual(p.rows.flat(), '1234567890'.split(''))
   p.tapChar(0, 0)
-  assert.equal(p.code, '0')
+  assert.equal(p.code, '1')
   p.tapBack()
   assert.equal(p.code, '')
 })
@@ -327,7 +418,7 @@ test('pair pairTap：缺 host / 配对码不是 8 位数字先本地校验，不
   const p = mount(comps.pair)
   p.pairMode = 'hub'
   await p.pairTap()
-  assert.match(p.msg, /服务器/)
+  assert.match(p.msg, /IP/)
   p.host = '192.168.1.20'
   p.code = 'ABC'
   await p.pairTap()
@@ -336,7 +427,7 @@ test('pair pairTap：缺 host / 配对码不是 8 位数字先本地校验，不
   assert.equal(globalThis.__velaFetch, undefined)
 })
 
-test('pair pairTap：hub 配对成功——ping+快照种子，token 验证过才保留，1.2s 后自动回主页', async () => {
+test('pair 手动连接手机：验证并下载计划后保存连接，点返回首页才离开', async () => {
   globalThis.__velaFetch = async opts => {
     if (opts.url.endsWith('/watch/ping')) return { code: 200, data: { ok: true, server: 'hub', rev: 1, time: 1 } }
     if (opts.url.endsWith('/watch/snapshot')) {
@@ -349,13 +440,15 @@ test('pair pairTap：hub 配对成功——ping+快照种子，token 验证过�
   p.host = '192.168.1.20'
   p.code = '13572468'
   await p.pairTap()
-  assert.match(p.msg, /配对成功/)
+  assert.equal(p.stage, 'success')
+  assert.match(p.msg, /共 2 套/)
   const { sGet } = await import('../src/js/store')
   assert.equal(await sGet('hubToken', ''), '13572468')
   assert.equal(await sGet('hubHost', ''), '192.168.1.20')
   const st = await getJSON('hubState', null)
   assert.equal(st.ready.today.name, '推日')      // 快照已种子进本地状态
-  await new Promise(res => setTimeout(res, 1400)) // 自动回主页的定时器
+  assert.deepEqual(globalThis.__routes, [])
+  p.backTap()
   assert.deepEqual(globalThis.__routes, [{ way: 'back' }])
 })
 
@@ -366,7 +459,7 @@ test('pair pairTap：ping 失败（token 错）→ token 清掉不算配对', as
   p.host = '192.168.1.20'
   p.code = '13572468'
   await p.pairTap()
-  assert.match(p.msg, /失败/)
+  assert.match(p.msg, /配对码无效/)
   const { sGet } = await import('../src/js/store')
   assert.equal(await sGet('hubToken', ''), '')
 })
@@ -377,47 +470,59 @@ test('pair spikeTap：跳转传输诊断页', async () => {
   assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/spike' }])
 })
 
-// ---------- pair hub 开关（S7：hub/直连 切换 + 持久化 + 明确状态） ----------
-
-test('pair modeTap：hub↔直连 切换持久化 pairMode，键盘与状态文案按模式重建', async () => {
-  const p = mount(comps.pair)
-  await p.onShow()                        // 首次使用默认电脑配对
-  assert.equal(p.pairMode, 'direct')
-  assert.equal(p.rows.length, 2)          // host '1234567890.:' 12 个按 6/行
-  p.setTab('code')
-  assert.equal(p.rows.length, 4)          // 电脑配对码按 8 个字符一行
+test('pair 浏览设备选项时保持当前连接，确认才切换到另一台已配对设备', async () => {
+  await sSet('pairMode', 'direct')
   await sSet('hubHost', '192.168.1.20')
   await sSet('hubToken', '12345678')
-  await p.modeTap()
-  assert.equal(p.pairMode, 'hub')
-  assert.equal(p.host, '192.168.1.20')
-  assert.equal(p.rows.length, 2)          // 手机配对码只含数字
-
-  await p.modeTap()
-  assert.equal(p.pairMode, 'direct')
-  assert.equal(p.host, '')
-  assert.match(p.msg, /直连服务器/)
+  const p = mount(comps.pair)
+  await p.onShow()
+  assert.equal(p.stage, 'device')
+  await p.selectDevice('hub')
+  assert.equal(p.stage, 'saved')
+  p.backTap()
+  assert.equal(p.stage, 'device')
   assert.equal(await sGet('pairMode', ''), 'direct')
-  p.setTab('code')
-  assert.equal(p.rows.length, 4)          // v1 配对码 32 个按 8/行
-
-  await p.modeTap()
-  assert.equal(p.pairMode, 'hub')
-  assert.match(p.msg, /手机 hub/)
+  await p.selectDevice('hub')
+  await p.useSavedTap()
   assert.equal(await sGet('pairMode', ''), 'hub')
-  assert.equal(p.rows.length, 2)
+  assert.deepEqual(globalThis.__routes, [{ way: 'back' }])
 })
 
-test('pair onShow：已有 v1 凭证且未显式选模式 → 自动落直连', async () => {
+test('pair 电脑已配对：使用已保存 IP 和端口，可重新配对', async () => {
   await sSet('host', '192.168.1.10:8080')
   await sSet('token', 'tok')
   const p = mount(comps.pair)
   await p.onShow()
-  assert.equal(p.pairMode, 'direct')
+  await p.selectDevice('direct')
+  assert.equal(p.stage, 'saved')
   assert.equal(p.host, '192.168.1.10:8080')
+  p.startPairing()
+  p.nextTap()
+  assert.equal(p.stage, 'code')
+  assert.deepEqual(p.rows.flat(), 'ABCDEFGHJKLM'.split(''))
+  p.tapChar(0, 0)
+  p.selectCodePage(1)
+  assert.deepEqual(p.rows.flat(), 'NPQRSTUVWXYZ'.split(''))
+  p.tapChar(0, 0)
+  p.selectCodePage(2)
+  assert.deepEqual(p.rows.flat(), '23456789'.split(''))
+  p.tapChar(0, 0)
+  assert.equal(p.code, 'AN2')
 })
 
-test('pair 直连 pairTap：redeem 成功 → host 带 :8080 落库、token 保存、计划缓存、自动回主页', async () => {
+test('pair 输入 IP：常见网段一次填入，数字键继续补完整 IP', async () => {
+  const p = mount(comps.pair)
+  await p.selectDevice('direct')
+  p.usePrefix('192.168.')
+  p.tapChar(0, 0)
+  p.tapChar(3, 0)
+  p.tapChar(0, 1)
+  assert.equal(p.host, '192.168.1.2')
+  p.nextTap()
+  assert.equal(p.stage, 'code')
+})
+
+test('pair 电脑配对成功：默认 :8080，缓存动作单并显示结果', async () => {
   const state = planState()
   globalThis.__velaFetch = async opts => {
     if (opts.url.endsWith('/api/pair/redeem')) {
@@ -437,14 +542,43 @@ test('pair 直连 pairTap：redeem 成功 → host 带 :8080 落库、token 保�
   p.host = '192.168.1.10'
   p.code = 'ABCD2345'
   await p.pairTap()
-  assert.match(p.msg, /直连配对成功/)
+  assert.equal(p.stage, 'success')
+  assert.match(p.msg, /共 2 套/)
   assert.equal(await sGet('host', ''), '192.168.1.10:8080')
   assert.equal(await sGet('token', ''), 'tok-90d')
   const plan = await getJSON('plan', null)
   assert.equal(plan.routines.length, 2)
   assert.equal(plan.queue.ids[0], 'r1')
-  await new Promise(res => setTimeout(res, 1400))   // 自动回主页
+  p.backTap()
   assert.deepEqual(globalThis.__routes, [{ way: 'back' }])
+})
+
+test('pair 电脑一次性码验证后断线：重试只下载动作单，不再次消费配对码', async () => {
+  let exchanged = false
+  let offline = true
+  globalThis.__velaFetch = async opts => {
+    if (opts.url.endsWith('/api/pair/redeem')) {
+      if (exchanged) return { code: 400, data: { error: 'invalid or expired code' } }
+      exchanged = true
+      return { code: 200, data: { token: 'new-token' } }
+    }
+    if (offline) throw new Error('断线')
+    assert.equal(opts.header.Authorization, 'Bearer new-token')
+    return { code: 200, data: { state: planState(), rev: 2 } }
+  }
+  const p = mount(comps.pair)
+  await p.onShow()
+  await p.selectDevice('direct')
+  p.host = '192.168.1.10'
+  p.nextTap()
+  p.code = 'ABCD2345'
+  await p.pairTap()
+  assert.equal(p.stage, 'code')
+  assert.equal(await sGet('token', ''), '')
+  offline = false
+  await p.pairTap()
+  assert.equal(p.stage, 'success')
+  assert.equal(await sGet('token', ''), 'new-token')
 })
 
 test('pair 直连 pairTap：redeem 失败 → token 清掉不算配对', async () => {
@@ -455,7 +589,7 @@ test('pair 直连 pairTap：redeem 失败 → token 清掉不算配对', async (
   p.host = '192.168.1.10'
   p.code = 'ABCD2345'
   await p.pairTap()
-  assert.match(p.msg, /失败/)
+  assert.match(p.msg, /配对码已过期/)
   assert.equal(await sGet('token', ''), '')
 })
 
@@ -468,53 +602,136 @@ test('index onShow：pairMode 显式 direct 时忽略 hub 凭证，按直连显�
   await seedPlan()
   const p = mount(comps.index)
   await p.onShow()
-  assert.equal(p.hubMode, false)
-  assert.equal(p.host, '127.0.0.1:8080')
-  assert.equal(p.hasSetup, true)
-  assert.equal(p.todayName, '推日')
+  assert.match(p.deviceLabel, /电脑离线/)
+  assert.equal(p.phoneLabel, '切换至手机连接')
+  await p.phoneTap()
+  assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/pair', params: { focus: 'hub' } }])
+})
+
+test('解除电脑配对保留缓存和原档案待发记录，连接新档案后不会上传旧记录', async () => {
+  await sSet('host', '127.0.0.1:8080')
+  await sSet('token', 'original')
+  await sSet('pairMode', 'direct')
+  await seedPlan()
+  await setJSON('pending', [{ id: 'old', name: '旧记录', entries: [] }])
+  const pair = mount(comps.pair)
+  await pair.selectDevice('direct')
+  await pair.unpairTap()
+  await pair.unpairTap()
+  assert.equal(await sGet('pairMode', ''), 'offline')
+  assert.equal(await sGet('token', ''), '')
+  assert.equal((await getJSON('plan', null)).routines.length, 2)
+  const original = await getJSON('pending', [])
+  assert.equal(original.length, 1)
+  assert.ok(original[0].owner)
+  await sSet('host', '127.0.0.1:8080')
+  await sSet('token', 'other')
+  await sSet('pairMode', 'direct')
+  globalThis.__velaFetch = async opts => {
+    assert.equal(opts.method, 'GET')
+    return { code: 200, data: { state: planState(), rev: 1 } }
+  }
+  await mount(comps.index).onShow()
+  assert.deepEqual(await getJSON('pending', []), original)
 })
 
 // ---------- pair/index（S8 2A：免输入系统配对 interconnect） ----------
 
-test('pair onShow：系统通道诊断 1001（手机未装 App）→ 明确文案不静默', async () => {
-  await sSet('pairMode', 'hub')
-  globalThis.__icDiag = 1001
-  const p = mount(comps.pair)
-  await p.onShow()
-  await new Promise(r => setTimeout(r, 10))   // 诊断桩一步异构步，等它落定
-  assert.match(p.msg, /手机未安装 openGym/)
-  globalThis.__icDiag = undefined
-})
-
-test('pair onShow：系统通道 OK 且无凭证 → 免输入自动配对（ping+快照种子、写 interconnect 凭证、自动回主页）', async () => {
-  await sSet('pairMode', 'hub')
+test('pair 手机入口直接开始自动连接，等手机回应和读取动作单时显示不同进度', async () => {
   globalThis.__icDiag = 0
-  globalThis.__icTimeout = 60
   globalThis.__icSent = []
-  globalThis.__icReply = async m => {
-    if (m.path === '/watch/ping') return { id: m.id, status: 200, body: { ok: true, rev: 1, time: 1 } }
-    if (m.path === '/watch/snapshot') {
-      return { id: m.id, status: 200, body: { ok: true, rev: 1, snapshot: { v: 1, unit: 'kg', restSec: 90, active: null, ready: { today: { name: '推日训练' }, others: [{ name: '腿日' }] } } } }
-    }
-    return { id: m.id, status: 200, body: { ok: true, acked: ((m.body && m.body.events) || []).map(e => e.id) } }
+  const waits = {}
+  globalThis.__icReply = m => new Promise(resolve => {
+    waits[m.path] = body => resolve({ id: m.id, status: 200, body })
+  })
+  try {
+    const p = mount(comps.pair)
+    await p.onShow()
+    const pending = p.selectDevice('hub')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(p.stage, 'phone')
+    assert.equal(p.busy, true)
+    assert.equal(p.autoStep, 2)
+    assert.match(p.autoTitle, /手机 openGym 回应/)
+    waits['/watch/ping']({ ok: true, rev: 1, time: 1 })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(p.autoStep, 3)
+    assert.match(p.autoTitle, /读取动作单/)
+    waits['/watch/snapshot']({ ok: true, rev: 1, snapshot: { v: 1, unit: 'kg', restSec: 90, active: null, ready: { today: { name: '推日训练' }, others: [{ name: '腿日' }] } } })
+    await pending
+    assert.equal(p.stage, 'success')
+    assert.equal(p.successMethod, '通过小米系统通道连接手机')
+    assert.equal(await sGet('hubHost', ''), 'interconnect')
+    assert.equal(await sGet('hubToken', ''), 'interconnect')
+    assert.equal((await getJSON('hubState', null)).ready.today.name, '推日训练')
+  } finally {
+    globalThis.__icDiag = undefined
+    globalThis.__icReply = undefined
+    globalThis.__icSent = undefined
   }
-  const p = mount(comps.pair)
-  await p.onShow()
-  await new Promise(r => setTimeout(r, 1500))   // 成功定时回主页（1200ms）
-  assert.match(p.msg, /配对成功 ✓（免输入）/)
-  assert.equal(await sGet('hubHost', ''), 'interconnect')
-  assert.equal(await sGet('hubToken', ''), 'interconnect')
-  const st = await getJSON('hubState', null)
-  assert.equal(st.ready.today.name, '推日训练')
-  assert.deepEqual(globalThis.__routes, [{ way: 'back' }])
-  assert.deepEqual(globalThis.__icSent.map(x => x.path), ['/watch/ping', '/watch/snapshot'])
-  globalThis.__icDiag = undefined
-  globalThis.__icTimeout = undefined
-  globalThis.__icReply = undefined
-  globalThis.__icSent = undefined
 })
 
-test('index onShow：interconnect 凭证 → hub 模式、主机行显示自动配对、今日来自快照', async () => {
+test('pair autoTap：旧手动配对仍可重试自动，探测成功但手机未回应时保留原配置', async () => {
+  await sSet('pairMode', 'hub')
+  await sSet('hubHost', '192.168.1.22')
+  await sSet('hubToken', '12345678')
+  globalThis.__icDiag = 0
+  globalThis.__icReply = async m => ({ id: m.id, status: 200, body: { ok: false } })
+  try {
+    const p = mount(comps.pair)
+    p.pairMode = 'hub'
+    await p.autoTap()
+    assert.equal(p.autoStep, 2)
+    assert.equal(p.autoTitle, '手机 App 回应异常')
+    assert.equal(await sGet('hubHost', ''), '192.168.1.22')
+    assert.equal(await sGet('hubToken', ''), '12345678')
+  } finally {
+    globalThis.__icDiag = undefined
+    globalThis.__icReply = undefined
+  }
+})
+
+test('pair 手机动作单响应错误：报告已连通的手机与失败步骤', async () => {
+  globalThis.__icDiag = 0
+  globalThis.__icReply = async m => ({
+    id: m.id, status: m.path === '/watch/snapshot' ? 503 : 200, body: { ok: true }
+  })
+  try {
+    const p = mount(comps.pair)
+    await p.selectDevice('hub')
+    assert.equal(p.autoStep, 3)
+    assert.equal(p.autoTitle, '读取动作单失败')
+    assert.match(p.autoHelp, /手机已回应/)
+    assert.equal(await sGet('hubHost', ''), '')
+  } finally {
+    globalThis.__icDiag = undefined
+    globalThis.__icReply = undefined
+  }
+})
+
+test('pair autoTap：旧手动配对切换自动，拿到手机计划才保留系统通道', async () => {
+  await sSet('pairMode', 'hub')
+  await sSet('hubHost', '192.168.1.22')
+  await sSet('hubToken', '12345678')
+  globalThis.__icDiag = 0
+  globalThis.__icReply = async m => m.path === '/watch/snapshot'
+    ? { id: m.id, status: 200, body: { ok: true, rev: 11, snapshot: { v: 1, unit: 'kg', restSec: 90, active: null, ready: { today: { name: '测试计划' }, others: [] } } } }
+    : { id: m.id, status: 200, body: { ok: true, proto: 3 } }
+  try {
+    const p = mount(comps.pair)
+    p.pairMode = 'hub'
+    await p.autoTap()
+    assert.equal(p.stage, 'success')
+    assert.equal(await sGet('hubHost', ''), 'interconnect')
+    const st = await getJSON('hubState', null)
+    assert.equal(st.ready.today.name, '测试计划')
+  } finally {
+    globalThis.__icDiag = undefined
+    globalThis.__icReply = undefined
+  }
+})
+
+test('首页系统通道收到有效快照后才显示手机已连接', async () => {
   await sSet('hubHost', 'interconnect')
   await sSet('hubToken', 'interconnect')
   globalThis.__icDiag = 0
@@ -524,10 +741,8 @@ test('index onShow：interconnect 凭证 → hub 模式、主机行显示自动�
     : { id: m.id, status: 200, body: { ok: true, acked: ((m.body && m.body.events) || []).map(e => e.id) } }
   const p = mount(comps.index)
   await p.onShow()
-  assert.equal(p.hubMode, true)
-  assert.equal(p.host, '自动配对（系统通道）')
-  assert.equal(p.hasSetup, true)
-  assert.equal(p.todayName, '推日训练')
+  assert.equal(p.deviceLabel, '手机已连接')
+  assert.equal(p.phoneLabel, '等待手机开始训练')
   globalThis.__icDiag = undefined
   globalThis.__icTimeout = undefined
   globalThis.__icReply = undefined
@@ -535,14 +750,16 @@ test('index onShow：interconnect 凭证 → hub 模式、主机行显示自动�
 
 // ---------- spike 页（S2 传输诊断） ----------
 
-test('spike onShow：目标默认取配对 host 裸 IP，端口固定 8765；可独立改手机 IP', async () => {
+test('spike onShow：电脑 IP 不能默认充当手机 IP；手机配对提供正确默认值', async () => {
   await sSet('host', 'http://192.168.1.10:8080')
   const p = mount(comps.spike)
   await p.onShow()
   assert.equal(p.host, '192.168.1.10:8080')
-  assert.equal(p.ip, '192.168.1.10')
-  assert.equal(p.tgt, '192.168.1.10') // 未设 spikeHost 时回落配对 IP
+  assert.equal(p.tgt, '')
   assert.equal(p.PORT, 8765)
+  await sSet('hubHost', '192.168.1.20:8765')
+  await p.onShow()
+  assert.equal(p.tgt, '192.168.1.20')
 
   await sSet('spikeHost', '192.168.1.23')
   const p2 = mount(comps.spike)
@@ -575,7 +792,7 @@ test('spike editTap/tapDone：键盘编辑手机 IP 并持久化到 spikeHost（
 })
 
 test('spike getTap：GET 发到手机 spike 服务，HTTP 200 记为通', async () => {
-  await sSet('host', '192.168.1.10:8080')
+  await sSet('hubHost', '192.168.1.10:8765')
   const seen = []
   globalThis.__velaFetch = async opts => {
     seen.push(opts)
@@ -605,7 +822,7 @@ test('spike getTap：spikeHost 优先于配对 host', async () => {
 })
 
 test('spike postTap：JSON 手动 stringify + Content-Type 头（Vela 表单编码坑）', async () => {
-  await sSet('host', '192.168.1.10')
+  await sSet('hubHost', '192.168.1.10')
   const seen = []
   globalThis.__velaFetch = async opts => {
     seen.push(opts)
@@ -623,7 +840,7 @@ test('spike postTap：JSON 手动 stringify + Content-Type 头（Vela 表单编�
 })
 
 test('spike seqTap：连发 3 次按序记录各自耗时', async () => {
-  await sSet('host', '192.168.1.10')
+  await sSet('hubHost', '192.168.1.10')
   let n = 0
   globalThis.__velaFetch = async () => ({ code: 200, data: 'ok' + (++n) })
   const p = mount(comps.spike)
@@ -634,7 +851,7 @@ test('spike seqTap：连发 3 次按序记录各自耗时', async () => {
 })
 
 test('spike 失败路径：网络失败记 ✗ 不炸页面，短震动；HTTP 5xx 也是"通"', async () => {
-  await sSet('host', '192.168.1.10')
+  await sSet('hubHost', '192.168.1.10')
   let mode = 'fail'
   globalThis.__velaFetch = async () => {
     if (mode === 'fail') throw new Error('connection refused')
@@ -672,6 +889,36 @@ test('spike 未配置 host：不发包给可读提示', async () => {
   assert.deepEqual(p.lines, [])
 })
 
+test('spike 自动配对：GET/POST 诊断走系统通道而非电脑或手机 HTTP', async () => {
+  await sSet('host', '192.168.1.10:8080')
+  await sSet('hubHost', 'interconnect')
+  const calls = []
+  globalThis.__icReply = async m => {
+    calls.push(m)
+    return { id: m.id, status: 200, body: { ok: true, method: m.method } }
+  }
+  globalThis.__velaFetch = async () => { throw new Error('should not use HTTP') }
+  try {
+    const p = mount(comps.spike)
+    await p.onShow()
+    await p.getTap()
+    await p.postTap()
+    assert.deepEqual(calls.map(m => [m.method, m.path]), [['GET', '/spike'], ['POST', '/spike']])
+    assert.match(p.lines[0], /系统 POST ✓/)
+  } finally { delete globalThis.__icReply }
+})
+
+test('spike 尚未配对也能直接诊断系统通道', async () => {
+  globalThis.__icReply = async m => ({ id: m.id, status: 200, body: '{"ok":true}' })
+  try {
+    const p = mount(comps.spike)
+    await p.onShow()
+    p.systemTap()
+    await p.getTap()
+    assert.match(p.lines[0], /系统 GET ✓/)
+  } finally { delete globalThis.__icReply }
+})
+
 // ---------- index 页（S4：hub 模式） ----------
 
 function hubFetch(active, ready, rev, noAck) {
@@ -686,27 +933,30 @@ function hubFetch(active, ready, rev, noAck) {
   }
 }
 
-test('index onShow：hub 模式——显示手机 IP、今日来自快照 ready，开局路由到 session2', async () => {
+test('手机有今日安排也只更新首页状态，独立训练入口打开本地选单', async () => {
   await sSet('hubHost', '192.168.1.20')
   await sSet('hubToken', '13572468')
   globalThis.__velaFetch = hubFetch(null, { today: { name: '推日训练' }, others: [] }, 3)
   const p = mount(comps.index)
   await p.onShow()
-  assert.equal(p.hubMode, true)
-  assert.equal(p.host, '192.168.1.20')
-  assert.equal(p.todayName, '推日训练')
+  assert.equal(p.deviceLabel, '手机已连接')
+  assert.equal(p.phoneLabel, '等待手机开始训练')
+  assert.deepEqual(globalThis.__routes, [])
   await p.startTap()
-  assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/session2' }])
+  assert.deepEqual(globalThis.__routes, [{ way: 'push', uri: '/pages/pick', params: { mode: 'independent' } }])
 })
 
-test('index onShow：hub 模式断网沿用本地快照状态', async () => {
+test('手机断网时首页显示同步异常，本地动作单仍可独立训练', async () => {
   await sSet('hubHost', '192.168.1.20')
   await sSet('hubToken', '13572468')
-  await setJSON('hubState', { workout: null, ready: { today: { name: '缓存动作单' } } })
+  await setJSON('hubState', { workout: null, ready: { today: READY_TODAY } })
   const p = mount(comps.index)
   await p.onShow() // __velaFetch 未注入 = 断网
-  assert.equal(p.hubMode, true)
-  assert.equal(p.todayName, '缓存动作单')
+  assert.match(p.deviceLabel, /手机离线/)
+  assert.match(p.phoneLabel, /同步异常/)
+  const pick = mount(comps.pick, { mode: 'independent' })
+  await pick.onShow()
+  assert.equal(pick.routines[0].name, READY_TODAY.name)
 })
 
 // ---------- session2 页（S4：v2 hub 协议会话） ----------
@@ -725,6 +975,172 @@ const ACTIVE = {
 const READY_TODAY = { routineIds: ['r1'], name: '推日训练', entries: [
   { id: '0001', name: '卧推', mode: 'reps', restSec: 60, sets: [{ w: 40, r: 10, done: false, warmup: false }] }
 ] }
+
+test('pick 手机：离线列出今日和其他动作单，明确点选后只开启选中的计划', async () => {
+  await sSet('hubHost', '127.0.0.1:8765')
+  await sSet('hubToken', '13572468')
+  const legs = { ...READY_TODAY, routineIds: ['r2'], name: '腿日' }
+  await setJSON('hubState', { workout: null, unit: 'kg', restSec: 90, ready: { today: READY_TODAY, others: [legs] } })
+  const p = mount(comps.pick, { mode: 'hub' })
+  await p.onShow()
+  assert.deepEqual(p.routines.map(r => r.name), ['推日训练', '腿日'])
+  assert.equal(p.todayRid, p.routines[0].id)
+  assert.deepEqual(await getJSON('hubQueue', []), [])
+  await p.pick(1)
+  const route = globalThis.__routes[0]
+  assert.equal(route.way, 'replace')
+  assert.equal(route.uri, '/pages/session2')
+  const session = mount(comps.session2, route.params)
+  await session.onInit()
+  assert.equal(session.state.workout.name, '腿日')
+  assert.deepEqual((await getJSON('hubQueue', [])).map(e => e.routineIds), [['r2']])
+})
+
+test('手机已有训练仍留在首页；主动同步时手机已结束，就等待且不自动开今日计划', async () => {
+  await sSet('hubHost', '127.0.0.1:8765')
+  await sSet('hubToken', '13572468')
+  globalThis.__velaFetch = hubFetch({ ...ACTIVE, start: Date.now() }, { today: READY_TODAY }, 1)
+  const index = mount(comps.index)
+  await index.onShow()
+  assert.equal(index.phoneLabel, '手机训练中')
+  assert.equal(index.independentActive, false)
+  assert.deepEqual(globalThis.__routes, [])
+  await index.phoneTap()
+  const route = globalThis.__routes[0]
+  assert.equal(route.uri, '/pages/session2')
+  globalThis.__velaFetch = hubFetch(null, { today: READY_TODAY }, 2)
+  const session = mount(comps.session2, route.params)
+  await session.onInit()
+  assert.equal(session.phase, 'waiting')
+  assert.match(session.phoneNotice, /等待手机开始/)
+  assert.deepEqual(await getJSON('hubQueue', []), [])
+})
+
+test('index 停留首页时自动发现手机开练、结束；离开首页即停止轮询', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  await sSet('hubHost', '127.0.0.1:8765')
+  await sSet('hubToken', '13572468')
+  let calls = 0
+  let active = null
+  globalThis.__velaFetch = opts => hubFetch(active, { today: READY_TODAY }, ++calls)(opts)
+  const p = mount(comps.index)
+  await p.onShow()
+  assert.equal(p.phoneLabel, '等待手机开始训练')
+  active = { ...ACTIVE, start: Date.now() }
+  t.mock.timers.tick(10000)
+  await new Promise(setImmediate)
+  assert.equal(p.phoneLabel, '手机训练中')
+  assert.deepEqual(globalThis.__routes, [])
+  active = null
+  t.mock.timers.tick(10000)
+  await new Promise(setImmediate)
+  assert.equal(p.phoneLabel, '等待手机开始训练')
+  p.onHide()
+  const count = calls
+  t.mock.timers.tick(60000)
+  await new Promise(setImmediate)
+  assert.equal(calls, count)
+})
+
+test('主动等待后加入无动作单的手机训练，换场不自动跟入新训练', async () => {
+  await sSet('hubHost', '127.0.0.1:8765')
+  await sSet('hubToken', '13572468')
+  await seedPlan()
+  const independent = mount(comps.session, { rid: 'r1' })
+  await independent.onInit()
+  await independent.doneTap()
+  const before = await getJSON('active', null)
+  globalThis.__velaFetch = hubFetch(null, null, 1, true)
+  const page = mount(comps.session2, { follow: '1' })
+  await page.onInit()
+  assert.equal(page.phase, 'waiting')
+  const free = { ...ACTIVE, name: '自由训练', rest: { total: 75, at: Date.now(), endsAt: Date.now() + 45000 } }
+  globalThis.__velaFetch = hubFetch(free, null, 2, true)
+  await page.retryPhone()
+  assert.equal(page.wid, 'w1')
+  assert.equal(page.phase, 'rest')
+  assert.equal(page.restTotal, 75)
+  page.restSkip()
+  await page.doneTap()
+  assert.ok((await getJSON('hubQueue', [])).some(e => e.type === 'setDone' && e.wid === 'w1'))
+  globalThis.__velaFetch = hubFetch({ ...free, id: 'w2' }, null, 3, true)
+  await page.retryPhone()
+  assert.equal(page.phase, 'summary')
+  assert.equal(page.wid, 'w1')
+  assert.equal(page.endedOnPhone, true)
+  await page.saveTap()
+  assert.ok((await getJSON('hubQueue', [])).every(e => e.wid === 'w1' && e.type !== 'finish'))
+  assert.deepEqual(await getJSON('active', null), before)
+})
+
+test('重开同步页可在断线时恢复已主动加入的会话，重连换场不串记', async () => {
+  await sSet('hubHost', '127.0.0.1:8765')
+  await sSet('hubToken', '13572468')
+  globalThis.__velaFetch = hubFetch(ACTIVE, null, 1)
+  const p = mount(comps.session2, { follow: '1' })
+  await p.onInit()
+  globalThis.__velaFetch = undefined
+  const revived = mount(comps.session2, { follow: '1' })
+  await revived.onInit()
+  assert.equal(revived.wid, 'w1')
+  assert.match(revived.phoneNotice, /同步异常/)
+  await revived.doneTap()
+  assert.equal((await getJSON('hubQueue', []))[0].wid, 'w1')
+  globalThis.__velaFetch = hubFetch({ ...ACTIVE, id: 'other' }, null, 2)
+  await revived.pollOnce()
+  assert.equal(revived.wid, 'w1')
+  assert.equal(revived.phase, 'summary')
+})
+
+test('默认休息与振动设置落盘，独立训练生效，手机训练保留手机休息时间', async () => {
+  const settings = mount(comps.settings)
+  await settings.onShow()
+  await settings.chooseRest(settings.options.findIndex(o => o.label === '45 秒'))
+  await settings.toggleVibration()
+  const reopened = mount(comps.settings)
+  await reopened.onShow()
+  assert.equal(reopened.restSec, 45)
+  assert.equal(reopened.vibrate, false)
+  await seedPlan()
+  const independent = mount(comps.session, { rid: 'r2' })
+  await independent.onInit()
+  await independent.doneTap()
+  assert.equal(independent.restTotal, 45)
+  independent.restEndAt = Date.now() - 1
+  independent.tickRest()
+  assert.ok(!globalThis.__buzzes.includes('long'))
+  await sSet('hubHost', '127.0.0.1:8765')
+  await sSet('hubToken', '13572468')
+  globalThis.__velaFetch = hubFetch({ ...ACTIVE, rest: { total: 110, endsAt: Date.now() + 60000 } }, null, 1)
+  const phone = mount(comps.session2, { follow: '1' })
+  await phone.onInit()
+  assert.equal(phone.restTotal, 110)
+  phone.restEndAt = Date.now() - 1
+  phone.tickRest()
+  assert.ok(!globalThis.__buzzes.includes('long'))
+})
+
+test('独立训练可选手机缓存动作单，保存后不混入手机活动会话', async () => {
+  await sSet('hubHost', '127.0.0.1:8765')
+  await sSet('hubToken', '13572468')
+  globalThis.__velaFetch = hubFetch(ACTIVE, { today: READY_TODAY }, 1)
+  const home = mount(comps.index)
+  await home.onShow()
+  const pick = mount(comps.pick, { mode: 'independent' })
+  await pick.onShow()
+  await pick.pick(0)
+  const page = mount(comps.session, globalThis.__routes.at(-1).params)
+  await page.onInit()
+  await page.doneTap()
+  await page.saveTap()
+  assert.match(page.syncMsg, /已保存在手表/)
+  assert.equal((await loadState()).workout.id, 'w1')
+  assert.deepEqual(await getJSON('hubQueue', []), [])
+  const details = mount(comps.pending)
+  await details.onShow()
+  assert.match(details.summary, /1 场/)
+  assert.match(details.rows[0].status, /仅存手表/)
+})
 
 test('session2 onInit：接上手机正在跑的训练并定位到首个未完成组', async () => {
   await sSet('hubHost', '127.0.0.1:8765')

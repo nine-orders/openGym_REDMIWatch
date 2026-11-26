@@ -1,305 +1,532 @@
 <template>
   <div class="pg">
-    <div class="trow">
-      <text class="title">配对设置</text>
-      <text class="mtoggle" onclick="modeTap">{{ pairMode === 'direct' ? '电脑配对 ▸' : '手机配对 ▸' }}</text>
-      <text class="link" onclick="spikeTap">传输诊断→</text>
-    </div>
-
-    <div class="tabs">
-      <text class="tab {{ tab === 'host' ? 'tabOn' : '' }}" onclick="setTab('host')">服务器</text>
-      <text class="tab {{ tab === 'code' ? 'tabOn' : '' }}" onclick="setTab('code')">配对码</text>
-      <text class="key2" onclick="tapBack">删除</text>
-      <text class="key2" onclick="tapClear">清空</text>
-    </div>
-
-    <div class="field">
-      <text class="val" if="{{ tab === 'host' }}">{{ (host === 'interconnect' ? '自动配对（系统通道）' : host) || (pairMode === 'direct' ? '电脑IP，如 192.168.1.10' : '手机IP，如 192.168.1.10') }}</text>
-      <text class="val" if="{{ tab === 'code' }}">{{ code || (pairMode === 'direct' ? '8位配对码(A-Z/2-9)' : '8位数字token') }}</text>
-    </div>
-
-    <div class="grid">
-      <div class="grow" for="{{ (ri, row) in rows }}">
-        <text class="key {{ isWideCode ? 'nkey' : '' }}" for="{{ (ci, ch) in row }}" onclick="tapChar(ri, ci)">{{ ch }}</text>
+    <text class="status" if="{{ !ready }}">正在读取配对设置…</text>
+    <div class="col" if="{{ ready && stage === 'device' }}">
+      <text class="title">连接设备</text>
+      <div class="device device-main" onclick="selectDevice('direct')">
+        <text class="device-name">电脑配对</text>
+        <text class="device-note">下载动作单，离线也能练</text>
       </div>
+      <div class="device" onclick="selectDevice('hub')">
+        <text class="device-name">手机配对</text>
+        <text class="device-note">打开后自动查找手机 App</text>
+      </div>
+      <div class="footer">
+        <text class="footer-btn" onclick="backTap">返回</text>
+        <text class="footer-btn" onclick="spikeTap">传输诊断</text>
+      </div>
+      <text class="secondary" onclick="offlineTap">切到离线模式</text>
+      <text class="status error" if="{{ msg }}">{{ msg }}</text>
     </div>
 
-    <text class="btn-main" onclick="pairTap">{{ busy ? '配对中…' : (pairMode === 'direct' ? '配对并拉取计划' : '配对并拉取快照') }}</text>
-    <text class="msg {{ msg.indexOf('失败') === 0 ? 'merr' : '' }}" if="{{ msg }}">{{ msg }}</text>
-    <!-- 提示与结果消息互斥显示：键盘 + 结果都要留在 514 高度内（S6 修溢出，S7 再收紧） -->
-    <text class="hint" if="{{ !msg }}">{{ hint }}</text>
+    <div class="col" if="{{ ready && stage === 'saved' }}">
+      <div class="head">
+        <text class="back" onclick="backTap">‹ 返回</text>
+        <text class="label">{{ deviceName }}配对</text>
+      </div>
+      <text class="title">{{ pairMode === 'hub' ? '已保存手机连接' : '已配对电脑' }}</text>
+      <text class="status">{{ host || '小米系统通道' }}</text>
+      <text class="main" onclick="useSavedTap">{{ pairMode === 'hub' ? '使用已保存连接' : '使用此连接' }}</text>
+      <text class="secondary saved-action" onclick="startPairing">{{ pairMode === 'hub' ? (host ? '改用自动连接' : '重试自动连接') : '重新配对' }}</text>
+      <text class="secondary saved-action" if="{{ pairMode === 'hub' }}" onclick="manualTap">手动配对</text>
+      <text class="secondary saved-action" onclick="unpairTap">{{ confirmUnpair ? '再点一次解除配对' : '解除配对' }}</text>
+      <text class="status error" if="{{ msg }}">{{ msg }}</text>
+    </div>
+
+    <div class="col" if="{{ ready && stage === 'phone' }}">
+      <div class="head">
+        <text class="back" if="{{ !busy }}" onclick="backTap">‹ 返回</text>
+        <text class="label">手机配对</text>
+      </div>
+      <div class="auto-card">
+        <text class="auto-progress" if="{{ busy }}">自动连接 · {{ autoStep }}/3</text>
+        <text class="auto-progress error" if="{{ !busy }}">自动连接未完成 · {{ autoStep }}/3</text>
+        <text class="auto-title">{{ autoTitle }}</text>
+        <text class="auto-help">{{ autoHelp }}</text>
+      </div>
+      <text class="main" if="{{ !busy }}" onclick="autoTap">重试自动连接</text>
+      <text class="secondary" if="{{ !busy }}" onclick="manualTap">手动输入 IP 和配对码</text>
+    </div>
+
+    <div class="col" if="{{ ready && (stage === 'host' || stage === 'code') }}">
+      <div class="head">
+        <text class="back" onclick="backTap">‹ 返回</text>
+        <text class="label">{{ deviceName }}配对 · {{ stage === 'host' ? '1' : '2' }}/2</text>
+      </div>
+      <text class="input-title">{{ stage === 'host' ? '输入' + deviceName + ' IP' : '输入 8 位配对码' }}</text>
+      <div class="prefixes" if="{{ stage === 'host' && !host && !msg }}">
+        <text class="prefix-label">常用开头</text>
+        <text class="prefix" onclick="usePrefix('192.168.')">192.168.</text>
+        <text class="prefix" onclick="usePrefix('10.0.')">10.0.</text>
+      </div>
+      <text class="{{ msg ? 'hint error' : 'hint' }}" if="{{ stage !== 'host' || host || msg }}">{{ msg || hint }}</text>
+      <div class="field">
+        <text class="value" if="{{ stage === 'host' && host }}">{{ host }}</text>
+        <text class="value" if="{{ stage === 'code' && code }}">{{ code }}</text>
+        <text class="value placeholder" if="{{ stage === 'host' && !host }}">例如 192.168.1.10</text>
+        <text class="value placeholder" if="{{ stage === 'code' && !code }}">尚未输入</text>
+        <text class="erase" onclick="tapBack">删除</text>
+        <text class="clear" onclick="tapClear">清空</text>
+      </div>
+      <div class="code-pages" if="{{ isWideCode }}">
+        <text class="code-page {{ codePage === 0 ? 'page-active' : '' }}" onclick="selectCodePage(0)">A–M</text>
+        <text class="code-page {{ codePage === 1 ? 'page-active' : '' }}" onclick="selectCodePage(1)">N–Z</text>
+        <text class="code-page {{ codePage === 2 ? 'page-active' : '' }}" onclick="selectCodePage(2)">2–9</text>
+      </div>
+      <div class="grid">
+        <div class="keys {{ stage === 'code' && !isWideCode && ri === 3 ? 'keys-center' : '' }}" for="{{ (ri, row) in rows }}">
+          <text class="{{ isWideCode ? 'letter' : 'key' }}" for="{{ (ci, ch) in row }}" onclick="tapChar(ri, ci)">{{ ch }}</text>
+        </div>
+      </div>
+      <text class="main compact" if="{{ stage === 'host' }}" onclick="nextTap">下一步</text>
+      <text class="main compact" if="{{ stage === 'code' }}" onclick="pairTap">{{ busy ? '正在连接…' : (retryDownload ? '重试下载动作单' : '连接并获取动作单') }}</text>
+    </div>
+
+    <div class="col" if="{{ ready && stage === 'success' }}">
+      <text class="success-label">{{ deviceName }}已连接</text>
+      <text class="title">配对成功</text>
+      <text class="status">{{ successMethod }}</text>
+      <text class="intro">{{ msg }}</text>
+      <text class="main" onclick="backTap">返回首页</text>
+    </div>
   </div>
 </template>
 
 <script>
-// v2 配对（S4）+ hub 开关（S7，按 plan.md S3/S6 遗留与 s7-real-device 发现）：
-//   「模式」切换 手机 hub / 直连服务器，选择持久化在 pairMode（'hub'|'direct'）。
-//   手机 hub：host = 手机 IP（无端口默认 :8765），配对码 = hub 首启生成、通知栏展示的
-//     8 位数字 token（docs/watch-v2/s3-android-hub.md 契约）；成功自动回主页。
-//   直连服务器（v1 fallback）：host = 电脑 IP（无端口默认 :8080），配对码 = 网页端
-//     「设置 → 配对手机应用」的 8 位码（api.js redeem，5 分钟有效）；成功拉档案建计划缓存。
-//   模式未显式选过时优先沿用已有手机配对，否则显示电脑配对。
 import router from '@system.router'
-import { sGet, sSet, setJSON, buzz } from '../../js/store'
-import { ping, syncSnapshot } from '../../js/hub'
+import { sGet, sSet, buzz, getJSON } from '../../js/store'
+import { bindPendingPhone, ping, syncSnapshot, uid } from '../../js/hub'
 import { redeem, getData } from '../../js/api'
-import { IC_HOST, probeIc } from '../../js/ic'
-import { buildPlanCache } from '../../js/session'
+import { IC_HOST, IC_UNAVAILABLE, probeIc } from '../../js/ic'
+import { bindPendingComputer, buildPlanCache } from '../../js/session'
+import { connectionOwner, readConnection, readDevice, savePairing } from '../../js/connections'
 
-const HOST_CHARS = '1234567890.:'
-const CODE_CHARS = '0123456789'
-const DIRECT_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+const HOST_KEYS = [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9'], ['.', '0', ':']]
+const PHONE_CODE_KEYS = HOST_KEYS.slice(0, 3).concat([['0']])
+const DIRECT_CODE_KEYS = ['ABCDEFGHJKLM', 'NPQRSTUVWXYZ', '23456789']
+  .map(group => group.match(/.{4}/g).map(row => row.split('')))
 
 export default {
   data: {
-    tab: 'host',
+    ready: false,
+    stage: 'device',
     pairMode: 'direct',
+    deviceName: '电脑',
     host: '',
     code: '',
     rows: [],
     msg: '',
     hint: '',
     isWideCode: false,
-    busy: false
+    codePage: 0,
+    retryDownload: false,
+    autoStep: 1,
+    autoTitle: '',
+    autoHelp: '',
+    successMethod: '',
+    busy: false,
+    closed: false,
+    confirmUnpair: false
   },
-  async onShow() {
-    // 显式选择优先。已有手机凭证时沿用手机配对，否则默认电脑配对。
-    let pm = await sGet('pairMode', '')
-    if (pm !== 'hub' && pm !== 'direct') {
-      const hh = await sGet('hubHost', '')
-      const ht = await sGet('hubToken', '')
-      pm = (hh && ht) ? 'hub' : 'direct'
-    }
-    this.pairMode = pm
-    this.host = await sGet(pm === 'hub' ? 'hubHost' : 'host', '')
-    if (this.host.indexOf('http://') === 0) this.host = this.host.slice(7)
-    this.rebuild()
-    // S8 2A：免输入系统配对探测（不阻塞输入；成功才接管）
-    this._probeIc()
-  },
-  // 系统通道探测 + 免输入配对：诊断 OK 且无既有 hub 凭证时自动完成原来手点的配对；
-  // 失败给出明确状态文案（手机未安装 / 通道不可用），绝不静默卡住——手动配对照常可用。
-  async _probeIc() {
-    if (this.pairMode !== 'hub') return
-    const hh = await sGet('hubHost', '')
-    const ht = await sGet('hubToken', '')
-    if (hh && ht) return
-    try {
-      const st = await probeIc()
-      if (this.pairMode !== 'hub' || this.busy) return
-      if (st.status === 0) {
-        this.busy = true
-        await sSet('hubHost', IC_HOST)
-        await sSet('hubToken', IC_HOST)
-        this.msg = '系统通道已连接，正在确认手机 hub…'
-        try {
-          await ping()
-          const snap = await syncSnapshot()
-          const r = snap.state && snap.state.ready
-          const n = r ? ((r.today ? 1 : 0) + (r.others ? r.others.length : 0)) : 0
-          this.msg = '配对成功 ✓（免输入）可开始 ' + n + ' 场'
-          buzz('long')
-          setTimeout(() => router.back(), 1200)
-        } catch (e) {
-          await sSet('hubHost', '')
-          await sSet('hubToken', '')
-          this.msg = '系统通道已连但 hub 无响应：' + e.message + '（可用 IP+token 手动配对）'
-        } finally {
-          this.busy = false
-        }
-        return
-      }
-      if (this.msg) return
-      this.msg = st.status === 1001
-        ? '手机未安装 openGym：请先安装手机 App（或用下方 IP+token 手动配对）'
-        : '系统配对不可用（' + st.status + '）：用下方 IP+token 手动配对'
-    } catch (e) {
-      if (this.pairMode !== 'hub' || this.busy || this.msg) return
-      this.msg = '系统配对探测失败：' + e.message + '（可手动配对）'
-    }
-  },
-  rebuild() {
-    const isHub = this.pairMode !== 'direct'
-    if (this.tab === 'host') {
-      this.rows = splitRows(HOST_CHARS, 6)
-      this.isWideCode = false
-    } else if (isHub) {
-      this.rows = splitRows(CODE_CHARS, 6)
-      this.isWideCode = false
-    } else {
-      // v1 配对码 32 个字符按 8 个一行：4 行窄键（514 高度约束）
-      this.rows = splitRows(DIRECT_CODE_CHARS, 8)
-      this.isWideCode = true
-    }
-    this.hint = isHub
-      ? '流程：手机 openGym 通知栏查看「IP · token」，服务器页填 IP（默认端口 8765），配对码页填 8 位数字。'
-      : '流程：电脑 openGym → 设置 → 配对手机应用 → 8 位码（5 分钟有效），服务器页填电脑 IP（默认端口 8080），配对码页填 8 位码。'
-  },
-  setTab(t) {
-    this.tab = t
-    this.rebuild()
-    buzz('short')
-  },
-  async modeTap() {
+  onInit() { if (this.focus === 'hub') return this.selectDevice('hub') },
+  onShow() { this.ready = true },
+  onDestroy() { this.closed = true },
+
+  async selectDevice(mode) {
     if (this.busy) return
-    // hub/直连切换：持久化选择 + 明确状态提示；清空配对码输入避免串模式
-    const next = this.pairMode === 'direct' ? 'hub' : 'direct'
-    this.pairMode = next
-    this.host = (await sGet(next === 'hub' ? 'hubHost' : 'host', '')).replace(/^http:\/\//, '')
-    await sSet('pairMode', next)
+    this.busy = true
+    this.pairMode = mode
+    const isPhone = mode === 'hub'
+    this.deviceName = isPhone ? '手机' : '电脑'
+    const savedHost = await sGet(isPhone ? 'hubHost' : 'host', '')
+    const savedToken = await sGet(isPhone ? 'hubToken' : 'token', '')
+    this.host = savedHost === IC_HOST ? '' : savedHost.replace(/^http:\/\//, '')
     this.code = ''
-    this.msg = next === 'direct'
-      ? '已切到「直连服务器」模式：对电脑 openGym 配对'
-      : '已切到「手机 hub」模式：对手机 openGym 配对'
-    buzz('short')
-    this.rebuild()
-    this._probeIc()
-  },
-  tapChar(ri, ci) {
-    const ch = (this.rows[ri] || [])[ci]
-    if (!ch) return
+    this.codePage = 0
+    this._computerPair = null
+    this.retryDownload = false
     this.msg = ''
-    if (this.tab === 'host') this.host = (this.host + ch).slice(0, 21)
-    else this.code = (this.code + ch).slice(0, 8)
-    buzz('short')
+    this.confirmUnpair = false
+    this.busy = false
+    if (savedHost && savedToken) this.stage = 'saved'
+    else return this.startPairing()
   },
-  tapBack() {
-    if (this.tab === 'host') this.host = this.host.slice(0, -1)
-    else this.code = this.code.slice(0, -1)
-    buzz('short')
-  },
-  tapClear() {
-    if (this.tab === 'host') this.host = ''
-    else this.code = ''
-    buzz('short')
-  },
-  async pairTap() {
+  startPairing() {
     if (this.busy) return
-    const isHub = this.pairMode !== 'direct'
-    const host = (this.host || '').trim()
-    const code = (this.code || '').trim()
-    if (!host) {
-      this.msg = isHub ? '先在「服务器」页输入手机的局域网 IP' : '先在「服务器」页输入电脑的局域网 IP'
-      return
+    this.msg = ''
+    if (this.pairMode === 'hub') {
+      this.stage = 'phone'
+      return this.autoTap()
     }
-    if (isHub) {
-      if (!/^\d{8}$/.test(code)) {
-        this.msg = 'token 是 8 位数字（手机通知栏查看），当前「' + (code || '空') + '」'
-        return
-      }
-      await sSet('hubHost', host)
-      await sSet('hubToken', code)
-      this.busy = true
-      const fullHost = host.indexOf(':') >= 0 ? host : host + ':8765'
-      this.msg = '正在连接 ' + fullHost + ' …'
-      try {
-        await ping()
-        const st = await syncSnapshot()
-        const r = st.state && st.state.ready
-        const n = r ? ((r.today ? 1 : 0) + (r.others ? r.others.length : 0)) : 0
-        this.msg = '配对成功 ✓ 可开始 ' + n + ' 场'
-        buzz('long')
-        // 成功即回主页（主页 onShow 会拉快照显示今日动作单）；失败留在本页改 token 重试
-        setTimeout(() => router.back(), 1200)
-      } catch (e) {
-        await sSet('hubToken', '')   // token 没验过就不算配对，避免 index 误入 hub 模式
-        this.msg = '失败：' + e.message
-      }
-      this.busy = false
-      return
-    }
-    // v1 直连（redeem）：host 先落库（api.call 读 host）、8 位码换 token、拉档案建计划缓存
-    const up = code.toUpperCase()
-    if (up.length !== 8) {
-      this.msg = '配对码是 8 位（A-Z 与 2-9），当前「' + (code || '空') + '」'
+    this.openInput('host')
+  },
+  manualTap() {
+    if (!this.busy) this.openInput('host')
+  },
+  async useSavedTap() {
+    if (this.busy) return
+    this.busy = true
+    const saved = await sSet('pairMode', this.pairMode)
+    this.busy = false
+    if (this.closed) return
+    if (saved) router.back()
+    else this.msg = '未能保存连接，请重试'
+  },
+  async offlineTap() {
+    if (this.busy) return
+    if (await sSet('pairMode', 'offline')) router.back()
+    else this.msg = '未能保存设置，请重试'
+  },
+  async unpairTap() {
+    if (this.busy) return
+    if (!this.confirmUnpair) {
+      this.confirmUnpair = true
+      this.msg = '待同步记录仍保存在手表'
       return
     }
     this.busy = true
-    const fullHost = host.indexOf(':') >= 0 ? host : host + ':8080'
-    this.msg = '正在连接 ' + fullHost + ' …'
     try {
-      await sSet('host', fullHost)
-      const res = await redeem(up)
-      await sSet('token', res.token)
-      const data = await getData()
-      const plan = buildPlanCache((data && data.state) || {})
-      await setJSON('plan', plan)
-      this.msg = '直连配对成功 ✓ 拉到 ' + plan.routines.length + ' 个动作单'
-      buzz('long')
-      setTimeout(() => router.back(), 1200)
-    } catch (e) {
-      await sSet('token', '')   // 没验过的不算配对
-      this.msg = '失败：' + e.message
+      const mode = this.pairMode
+      const existing = await readConnection(mode)
+      const device = await readDevice()
+      const owner = connectionOwner(existing)
+      if (mode === 'hub') await bindPendingPhone(owner)
+      else {
+        await bindPendingComputer(owner)
+        const plan = await getJSON('plan', null)
+        if (plan && plan.owner === undefined) await savePairing({ plan: JSON.stringify({ ...plan, owner }) })
+      }
+      const keys = mode === 'hub' ? { hubHost: '', hubToken: '', hubOwner: '' }
+        : { host: '', token: '', directOwner: '' }
+      if (device.mode === mode) keys.pairMode = 'offline'
+      await savePairing(keys)
+      this.stage = 'device'
+      this.msg = '已解除配对'
+    } catch (e) { this.msg = pairingError(e) }
+    finally { this.confirmUnpair = false; this.busy = false }
+  },
+
+  openInput(stage) {
+    this.stage = stage
+    this.msg = ''
+    const isPhone = this.pairMode === 'hub'
+    this.isWideCode = stage === 'code' && !isPhone
+    if (stage === 'host') {
+      this.rows = HOST_KEYS
+      this.hint = isPhone ? '手机 openGym 通知栏可查看 IP' : '电脑和手表需在同一局域网'
+    } else {
+      this.rows = isPhone ? PHONE_CODE_KEYS : DIRECT_CODE_KEYS[this.codePage]
+      this.hint = isPhone ? '手机 openGym 通知栏可查看数字码' : '电脑 openGym → 设置 → 配对手机应用'
     }
-    this.busy = false
+  },
+  nextTap() {
+    if (this.busy) return
+    if (!validAddress(this.host)) {
+      this.msg = '请输入正确的 IP，例如 192.168.1.10'
+      return
+    }
+    this.openInput('code')
+    buzz('short')
+  },
+  usePrefix(prefix) {
+    if (this.busy || this.stage !== 'host' || this.host) return
+    this.host = prefix
+    this.inputChanged()
+    buzz('short')
+  },
+  selectCodePage(page) {
+    if (this.busy || !this.isWideCode || !DIRECT_CODE_KEYS[page]) return
+    this.codePage = page
+    this.rows = DIRECT_CODE_KEYS[page]
+    buzz('short')
+  },
+  backTap() {
+    if (this.busy) return
+    this.msg = ''
+    if (this.stage === 'code') this.openInput('host')
+    else if (this.stage === 'host' && this.pairMode === 'hub') this.stage = 'phone'
+    else if (this.stage === 'device' || this.stage === 'success') router.back()
+    else this.stage = 'device'
+  },
+  tapChar(ri, ci) {
+    if (this.busy) return
+    const ch = (this.rows[ri] || [])[ci]
+    if (!ch) return
+    if (this.stage === 'host') this.host = (this.host + ch).slice(0, 21)
+    else this.code = (this.code + ch).slice(0, 8)
+    this.inputChanged()
+    buzz('short')
+  },
+  tapBack() {
+    if (this.busy) return
+    if (this.stage === 'host') this.host = this.host.slice(0, -1)
+    else this.code = this.code.slice(0, -1)
+    this.inputChanged()
+    buzz('short')
+  },
+  tapClear() {
+    if (this.busy) return
+    if (this.stage === 'host') this.host = ''
+    else this.code = ''
+    this.inputChanged()
+    buzz('short')
+  },
+  inputChanged() {
+    this.msg = ''
+    this.retryDownload = false
+  },
+
+  async autoTap() {
+    if (this.busy) return
+    this.busy = true
+    this.msg = ''
+    this.setAutoStep(1, '正在检查系统连接', '请在安卓手机上打开 openGym，并确认小米运动健康显示手表已连接。')
+    try {
+      const { status } = await probeIc()
+      if (this.closed) return
+      if (status === 0) {
+        await this.connectPhone({ host: IC_HOST, token: IC_HOST })
+      } else {
+        this.autoFailed(status)
+      }
+    } catch (e) {
+      if (!this.closed) this.autoFailed(e.code, e.message)
+    } finally {
+      this.busy = false
+    }
+  },
+  setAutoStep(step, title, help) {
+    this.autoStep = step
+    this.autoTitle = title
+    this.autoHelp = help
+  },
+  autoFailed(code, message) {
+    const step = this.autoStep
+    const [title, help] = phoneFailure(step, code, message)
+    this.setAutoStep(step, title, help)
+  },
+  async pairTap() {
+    if (this.busy) return
+    const isPhone = this.pairMode === 'hub'
+    const host = this.host.trim()
+    const code = this.code.trim().toUpperCase()
+    if (!validAddress(host)) {
+      this.openInput('host')
+      this.msg = '请输入正确的 IP，例如 192.168.1.10'
+      return
+    }
+    if (isPhone ? !/^\d{8}$/.test(code) : !/^[A-HJ-NP-Z2-9]{8}$/.test(code)) {
+      this.msg = isPhone ? '请输入通知栏里的 8 位数字' : '请输入电脑上显示的 8 位配对码'
+      return
+    }
+    this.busy = true
+    this.msg = ''
+    try {
+      if (isPhone) await this.connectPhone({ host, token: code })
+      else await this.connectComputer(host, code)
+    } catch (e) {
+      if (!this.closed) {
+        this.msg = this.retryDownload && !storageError(e)
+          ? '配对码已验证。检查网络后重试下载。'
+          : pairingError(e)
+      }
+    } finally {
+      this.busy = false
+    }
+  },
+  async connectPhone(connection) {
+    const auto = connection.host === IC_HOST
+    if (auto) this.setAutoStep(2, '正在等手机 openGym 回应', '小米系统通道已就绪。请让手机上的 openGym 保持打开。')
+    const response = await ping(connection)
+    if (!response || response.ok !== true) throw new Error('手机 App 回应异常')
+    if (this.closed) return
+    if (auto) this.setAutoStep(3, '正在读取动作单', '手机 openGym 已应答，正在读取并保存可用的训练计划。')
+    const existing = await readConnection('hub')
+    const same = existing && existing.host === connection.host && existing.token === connection.token
+    // System-channel pairing has no stable phone identity. A newly paired channel gets a new owner.
+    connection.owner = same ? connectionOwner(existing) : uid()
+    await bindPendingPhone(connectionOwner(existing))
+    const snap = await syncSnapshot(connection, { pairing: true, commit: async () => {
+      if (this.closed) throw new Error('配对已取消')
+      await savePairing({ hubHost: connection.host, hubToken: connection.token, hubOwner: connection.owner, pairMode: 'hub' })
+    } })
+    if (this.closed) return
+    const ready = snap.snapshot && snap.state && snap.state.ready
+    const count = ready ? ((ready.today ? 1 : 0) + (ready.others || []).length) : 0
+    this.showSuccess(count, '动作单已获取', auto ? '通过小米系统通道连接手机' : '通过 IP 和配对码连接手机')
+  },
+  async connectComputer(host, code) {
+    const address = host.indexOf(':') >= 0 ? host : host + ':8080'
+    let connection = this._computerPair
+    if (!connection || connection.host !== address || connection.code !== code) {
+      this.retryDownload = false
+      const response = await redeem(code, { host: address })
+      if (!response || typeof response.token !== 'string' || !response.token) throw new Error('未收到电脑凭证')
+      const profile = response.user && response.user.id
+      connection = { host: address, token: response.token, code,
+        owner: profile ? JSON.stringify([address, profile]) : uid() }
+      this._computerPair = connection
+    }
+    if (this.closed) return
+    this.retryDownload = true
+    let data
+    try {
+      data = await getData(connection)
+    } catch (e) {
+      if (e.code !== 401 && e.code !== 403) throw e
+      this._computerPair = null
+      this.retryDownload = false
+      throw new Error('code_expired')
+    }
+    if (!data || !data.state) throw new Error('未收到电脑动作单')
+    if (this.closed) return
+    const existing = await readConnection('direct')
+    await bindPendingComputer(connectionOwner(existing))
+    const plan = { ...buildPlanCache(data.state), owner: connection.owner }
+    await savePairing({ host: connection.host, token: connection.token, directOwner: connection.owner,
+      plan: JSON.stringify(plan), pairMode: 'direct' })
+    this._computerPair = null
+    this.showSuccess(plan.routines.length, '动作单已下载', '已验证电脑配对码')
+  },
+  showSuccess(count, result, method) {
+    if (this.closed) return
+    this.successMethod = method
+    this.stage = 'success'
+    this.msg = count
+      ? result + '，共 ' + count + ' 套。'
+      : '已连接，暂未获取到动作单。可在' + this.deviceName + '端 openGym 查看。'
+    buzz('long')
   },
   spikeTap() {
-    router.push({ uri: '/pages/spike' })
+    if (!this.busy) router.push({ uri: '/pages/spike' })
   }
 }
 
-function splitRows(chars, per) {
-  const rows = []
-  for (let i = 0; i < chars.length; i += per) {
-    rows.push(chars.slice(i, i + per).split(''))
+function phoneFailure(step, code, message) {
+  if (code === 1001) return ['没找到手机 openGym', '小米系统没找到配套安卓版。安装并打开配套 App 后重试。']
+  if (code === 1006) return ['小米系统通道已断开', '在小米运动健康里确认手表已连接，再返回重试。']
+  if (code === IC_UNAVAILABLE) return ['自动连接接口不可用', '这块手表当前无法使用系统通道。可改用手动配对。']
+  if (step === 1) {
+    if (code === 204) return ['检查系统连接超时', '在小米运动健康确认手表已连接，再打开 openGym 后重试。']
+    return ['小米系统未确认连接', '打开小米运动健康检查手表连接，再打开配套的 openGym App。']
   }
-  return rows
+  if (step === 2) {
+    if (message === '手机 App 回应异常' || (code >= 400 && code < 600)) {
+      return ['手机 App 回应异常', '系统通道已就绪，手机 App 的回应有误。退出后重新打开 openGym 再试。']
+    }
+    return ['手机 App 没有回应', '系统通道已就绪。将手机 openGym 切到前台后重试。']
+  }
+  if (storageError({ message })) return ['写入手表失败', '手机已回应，但配对信息未能保存。请重试。']
+  return ['读取动作单失败', '手机已回应，请在手机 openGym 打开训练页面后重试。']
 }
+
+function validAddress(value) {
+  const match = /^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/.exec(value.trim())
+  return !!match && match[1].split('.').every(part => Number(part) <= 255) &&
+    (!match[2] || (Number(match[2]) > 0 && Number(match[2]) <= 65535))
+}
+
+function storageError(error) {
+  return error.message === '配对设置未能写入手表' || error.message === '动作单未能写入手表'
+}
+
+function pairingError(error) {
+  if (storageError(error)) return '未能保存到手表，请重试'
+  if (error.message === 'code_expired') return '配对码已过期，请在电脑上生成新码'
+  if (error.message === 'invalid or expired code') return '配对码错误或已过期，请在电脑上生成新码'
+  if (error.code === 400 || error.code === 401 || error.code === 403) return '配对码无效，请核对后重试'
+  return '连接失败。请检查 Wi-Fi、IP 和对方的 openGym'
+}
+
 </script>
 
 <style>
-/* 曜黑极简 OLED Mono 换肤（2026-11）：纯黑底 + 单一酸性绿强调。
- * token：底 #000000 · 容器 #101013 · 次级钮/键 #19191E · 内嵌 #0A0A0E · 强调 #C9F73A · 强调上墨色 #0A0A0A
- *        主文字 #F5F5F7 · 次级 #9A9AA2 · 弱化 #62626A · 成功 #35D07F；琥珀/红/蓝链接为语义色不动。
- * S7 收紧布局（在 S6 压缩基础上再加模式开关行而不再溢出 514）：
-   宽度预算：trow（标题 24px + 模式钮 + 诊断链接）一行；tabs 吸收原来 grid 的删除/清空宽键；
-   直连配对码 4 行窄键（8/行，inline 宽度 42px）。页高按最大分支（直连：4 行窄键）算。 */
 .pg {
   position: absolute; width: 432px; height: 514px;
-  background-color: #000000; padding: 14px 22px;
+  background-color: #000000; padding: 16px 22px;
   flex-direction: column;
 }
-.trow { flex-direction: row; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-.title { font-size: 24px; color: #F5F5F7; font-weight: bold; }
-.mtoggle {
-  font-size: 18px; color: #d29922; background-color: #101013;
-  border-radius: 10px; padding: 2px 10px;
+.col { flex-direction: column; }
+.title { color: #F5F5F7; font-size: 36px; font-weight: bold; margin: 12px 0 16px; }
+.head {
+  height: 44px; flex-direction: row; align-items: center; justify-content: space-between;
+  margin-bottom: 3px;
 }
-.link { font-size: 18px; color: #58a6ff; }
-.tabs { flex-direction: row; justify-content: flex-end; margin-bottom: 6px; }
-.tab {
-  width: 88px; height: 42px; line-height: 42px; text-align: center;
-  color: #9A9AA2; font-size: 20px; background-color: #101013;
-  border-radius: 12px; margin-right: 6px;
+.label { font-size: 20px; color: #9A9AA2; }
+.back {
+  width: 110px; height: 44px; line-height: 44px; text-align: center;
+  border-radius: 14px; background-color: #19191E; color: #F5F5F7; font-size: 22px;
 }
-/* 快应用 CSS 不支持复合选择器，状态类须用独立类名（且写在基类之后） */
-.tabOn { background-color: #C9F73A; color: #0A0A0A; font-weight: bold; }
-.key2 {
-  width: 60px; height: 42px; line-height: 42px; text-align: center;
-  background-color: #19191E; color: #C9F73A; border-radius: 12px;
-  font-size: 18px; margin-left: 6px;
+.device {
+  height: 105px; padding: 12px 18px; margin-bottom: 10px;
+  flex-direction: column; justify-content: center; border-radius: 22px;
+  background-color: #19191E;
 }
+.device-main { background-color: #222A13; }
+.device-name { color: #F5F5F7; font-size: 31px; font-weight: bold; }
+.device-note { color: #BDBDC4; font-size: 20px; margin-top: 5px; }
+.footer { flex-direction: row; justify-content: space-between; margin-top: 6px; }
+.footer-btn {
+  width: 186px; height: 54px; line-height: 54px; text-align: center;
+  background-color: #101013; border-radius: 16px; color: #BDBDC4; font-size: 22px;
+}
+.intro { color: #BDBDC4; font-size: 23px; line-height: 32px; margin: 0 0 14px; }
+.auto-card {
+  flex-direction: column; background-color: #101013; border-radius: 20px;
+  padding: 16px 18px; margin-top: 10px; margin-bottom: 6px;
+}
+.auto-progress { color: #C9F73A; font-size: 18px; }
+.auto-title { color: #F5F5F7; font-size: 29px; font-weight: bold; margin: 8px 0; }
+.auto-help { color: #BDBDC4; font-size: 21px; line-height: 28px; }
+.status { color: #BDBDC4; font-size: 22px; margin: 10px 0; }
+.success-label { color: #C9F73A; font-size: 22px; margin-top: 28px; }
+.main {
+  height: 66px; line-height: 66px; text-align: center;
+  border-radius: 20px; background-color: #C9F73A; color: #0A0A0A;
+  font-size: 26px; font-weight: bold; margin-top: 8px;
+}
+.secondary {
+  height: 60px; line-height: 60px; text-align: center; margin-top: 10px;
+  border-radius: 18px; background-color: #19191E; color: #F5F5F7; font-size: 22px;
+}
+.saved-action { height: 49px; line-height: 49px; margin-top: 8px; }
+.input-title { color: #F5F5F7; font-size: 29px; font-weight: bold; }
+.hint { height: 40px; lines: 2; font-size: 18px; color: #BDBDC4; margin: 3px 0; }
+.prefixes {
+  height: 40px; margin: 3px 0; flex-direction: row; align-items: center;
+}
+.prefix-label { color: #BDBDC4; font-size: 18px; margin-right: 12px; }
+.prefix {
+  width: 110px; height: 36px; line-height: 36px; text-align: center;
+  color: #C9F73A; background-color: #19191E; border-radius: 10px; font-size: 20px;
+  margin-right: 8px;
+}
+.error { color: #FFC185; }
 .field {
-  height: 48px; background-color: #0A0A0E; border-radius: 12px;
-  justify-content: center; padding: 0 16px; margin-bottom: 6px;
-  flex-direction: column;
+  height: 49px; flex-direction: row; align-items: center; margin-bottom: 6px;
+  background-color: #101013; border-radius: 14px;
 }
-.val { font-size: 24px; color: #F5F5F7; }
-.grid { margin-bottom: 6px; flex-direction: column; }
-.grow { flex-direction: row; margin-bottom: 4px; }
-.key {
-  width: 56px; height: 44px; line-height: 44px; text-align: center;
-  background-color: #19191E; color: #F5F5F7; border-radius: 12px;
-  font-size: 22px; margin-right: 6px;
+.value { flex: 1; margin-left: 12px; font-size: 24px; color: #F5F5F7; lines: 1; }
+.placeholder { color: #9A9AA2; font-size: 22px; }
+.erase, .clear {
+  width: 59px; height: 49px; line-height: 49px; text-align: center;
+  color: #C9F73A; font-size: 20px;
 }
-/* 直连配对码 8 键/行：inline 宽度（复合选择器不可用） */
-.nkey { width: 42px; font-size: 20px; }
-.btn-main {
-  height: 60px; line-height: 60px; text-align: center;
-  background-color: #C9F73A; color: #0A0A0A; border-radius: 18px;
-  font-size: 24px; font-weight: bold; margin-bottom: 4px;
+.grid { flex-direction: column; }
+.keys { flex-direction: row; margin-bottom: 4px; }
+.keys-center { justify-content: center; }
+.key, .letter {
+  height: 55px; line-height: 55px; text-align: center;
+  background-color: #19191E; color: #F5F5F7; border-radius: 13px;
+  font-size: 26px;
 }
-.msg { font-size: 18px; color: #35D07F; margin-bottom: 2px; }
-.merr { color: #f85149; }
-.hint { font-size: 15px; color: #62626A; }
+.key { width: 120px; margin-right: 10px; }
+.letter { width: 90px; margin-right: 8px; }
+.code-pages { flex-direction: row; justify-content: space-between; margin-bottom: 6px; }
+.code-page {
+  width: 124px; height: 44px; line-height: 44px; text-align: center;
+  border-radius: 12px; background-color: #101013; color: #BDBDC4; font-size: 20px;
+}
+.page-active { color: #C9F73A; background-color: #222A13; font-weight: bold; }
+.compact { height: 53px; line-height: 53px; margin-top: 4px; font-size: 23px; }
 </style>

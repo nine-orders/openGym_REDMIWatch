@@ -1,7 +1,7 @@
 <template>
   <div class="pg">
     <text class="title">传输诊断</text>
-    <text class="tgt" onclick="editTap">手机 {{ tgt || '(未设IP)' }}:{{ PORT }}（点此改IP）</text>
+    <text class="tgt" onclick="editTap">{{ systemMode ? '手机系统通道' : ('手机 ' + (tgt || '(未设IP)') + ':' + PORT) }}（点此改IP）</text>
 
     <div class="row">
       <text class="btn {{ busy ? 'off' : '' }}" onclick="getTap">GET</text>
@@ -10,6 +10,7 @@
     </div>
     <div class="row">
       <text class="btn alt {{ busy ? 'off' : '' }}" onclick="pcTap">对照PC</text>
+      <text class="btn alt" onclick="systemTap">系统</text>
       <text class="btn alt" onclick="clearTap">清屏</text>
     </div>
 
@@ -17,7 +18,7 @@
 
     <div class="logbox {{ edit ? 'small' : '' }}" if="{{ !edit }}">
       <text class="ln" for="{{ (i, ln) in lines }}">{{ ln }}</text>
-      <text class="ln dim" if="{{ lines.length === 0 }}">先在手机装 SpikeHub 并点 Start，再点 GET。最新在上。</text>
+      <text class="ln dim" if="{{ lines.length === 0 }}">打开手机 openGym，再点 GET。最新在上。</text>
     </div>
 
     <div class="kb" if="{{ edit }}">
@@ -31,13 +32,14 @@
       </div>
     </div>
 
-    <text class="hint" if="{{ !edit }}">GET/POST 发往手机 SpikeHub(:8765)；对照PC 发配对服务器。两者都通=hub可行；PC通手机不通=代理不转发本机地址。</text>
+    <text class="hint" if="{{ !edit }}">GET/POST 测手机当前通道；点「系统」测试系统通道，改IP测试 HTTP；对照PC只测电脑。</text>
   </div>
 </template>
 
 <script>
 import fetch from '@system.fetch'
 import { sGet, sSet, buzz } from '../../js/store'
+import { icCall, IC_HOST } from '../../js/ic'
 
 const PORT = 8765
 const MAX_LINES = 8
@@ -47,8 +49,9 @@ export default {
   data: {
     PORT: PORT,
     host: '',     // 配对服务器 host（电脑），含端口
-    ip: '',       // 配对服务器的裸 IP，spikeHost 未设时的默认手机目标
     sHost: '',    // 手机 spike 应用的裸 IP（独立于配对 host，测完电脑不用改回）
+    systemMode: false,
+    autoPhone: false,
     tgt: '',
     rows: [],
     edit: false,
@@ -59,13 +62,24 @@ export default {
   async onShow() {
     this.host = await sGet('host', '')
     if (this.host.indexOf('http://') === 0) this.host = this.host.slice(7)
-    this.ip = (this.host.split(':')[0] || '').trim()
+    const hubHost = await sGet('hubHost', '')
+    this.autoPhone = hubHost === IC_HOST
     this.sHost = await sGet('spikeHost', '')
-    if (!this.sHost) this.sHost = this.ip
+    this.systemMode = this.autoPhone
+    if (this.systemMode) this.sHost = ''
+    else if (!this.sHost) this.sHost = hubHost.replace(/^http:\/\//, '').split(':')[0].trim()
     this.tgt = this.sHost
   },
   clearTap() {
     this.lines = []
+    this.msg = ''
+  },
+  systemTap() {
+    if (this.busy) return
+    this.systemMode = true
+    this.edit = false
+    this.sHost = ''
+    this.tgt = ''
     this.msg = ''
   },
   editTap() {
@@ -101,6 +115,7 @@ export default {
     this.edit = false
     await sSet('spikeHost', this.sHost.trim())
     this.tgt = this.sHost.trim()
+    this.systemMode = this.autoPhone && !this.tgt
     buzz('long')
   },
   // 任何 HTTP 状态码都算"通"（诊断的是可达性，不是业务结果）；
@@ -135,35 +150,47 @@ export default {
   },
   async run(label, fn) {
     if (this.busy) return
-    if (!this.tgt) { this.msg = '先点目标行设置手机 IP'; return }
+    if (label === 'PC' && !this.host) { this.msg = '未配置电脑服务器'; return }
+    if (label !== 'PC' && !this.systemMode && !this.tgt) { this.msg = '先点目标行设置手机 IP'; return }
     this.busy = true
     this.msg = '请求中…'
-    const line = await fn()
+    let line
+    try { line = await fn() } catch (e) { line = label + ' ✗ ' + (e.message || '请求失败') }
     this.lines = [line].concat(this.lines).slice(0, MAX_LINES)
     this.msg = ''
     this.busy = false
     buzz(line.indexOf('✗') >= 0 ? 'short' : 'long')
   },
+  async phoneReq(method, path, body) {
+    if (!this.systemMode) return this.req(method, 'http://' + this.tgt + ':' + PORT + path, body)
+    const t0 = Date.now()
+    try {
+      const res = await icCall(method, path, body)
+      return { ok: !!(res && res.ok), code: 200, ms: Date.now() - t0, head: JSON.stringify(res).slice(0, 80) }
+    } catch (e) {
+      return { ok: false, code: e.code || 0, ms: Date.now() - t0, head: e.message || '系统通道请求失败' }
+    }
+  },
   getTap() {
     return this.run('GET', async () => {
-      const r = await this.req('GET', 'http://' + this.tgt + ':' + PORT + '/spike?t=' + Date.now(), null)
-      return 'GET ' + mark(r) + ' ' + stat(r) + ' ' + r.head
+      const r = await this.phoneReq('GET', this.systemMode ? '/spike' : '/spike?t=' + Date.now(), null)
+      return (this.systemMode ? '系统 ' : '') + 'GET ' + mark(r) + ' ' + stat(r) + ' ' + r.head
     })
   },
   postTap() {
     return this.run('POST', async () => {
-      const r = await this.req('POST', 'http://' + this.tgt + ':' + PORT + '/spike', { type: 'spike.ping', ts: Date.now() })
-      return 'POST ' + mark(r) + ' ' + stat(r) + ' ' + r.head
+      const r = await this.phoneReq('POST', '/spike', { type: 'spike.ping', ts: Date.now() })
+      return (this.systemMode ? '系统 ' : '') + 'POST ' + mark(r) + ' ' + stat(r) + ' ' + r.head
     })
   },
   seqTap() {
     return this.run('×3', async () => {
       const parts = []
       for (let i = 0; i < 3; i++) {
-        const r = await this.req('GET', 'http://' + this.tgt + ':' + PORT + '/spike?t=' + Date.now(), null)
+        const r = await this.phoneReq('GET', this.systemMode ? '/spike' : '/spike?t=' + Date.now(), null)
         parts.push(mark(r) === '✓' ? String(r.ms) + 'ms' : '✗(' + r.head + ')')
       }
-      return '×3 ' + parts.join(' / ')
+      return (this.systemMode ? '系统 ' : '') + '×3 ' + parts.join(' / ')
     })
   },
   pcTap() {

@@ -2,13 +2,16 @@
   <div class="pg">
     <text class="title">选择动作单</text>
     <div class="empty" if="{{ !routines.length }}">
-      <text class="c-s">本地无计划。请先在网页端 openGym 添加动作单，然后在「配对设置」里重新拉取。</text>
+      <text class="c-s">{{ emptyText }}</text>
     </div>
-    <scroll class="list" if="{{ routines.length }}">
-      <div class="item" for="{{ (ri, r) in routines }}" onclick="pick($idx)">
-        <text class="today" if="{{ r.id === todayRid }}">今日</text>
+    <scroll class="list" scroll-y="true" if="{{ routines.length }}">
+      <div class="item" for="{{ (ri, r) in routines }}" onclick="pick(ri)">
         <text class="name">{{ r.name }}</text>
-        <text class="meta">{{ r.exN }} 个动作</text>
+        <div class="item-meta">
+          <text class="today" if="{{ r.id === todayRid }}">今日安排</text>
+          <text class="meta">{{ r.exN }} 个动作</text>
+          <text class="origin" if="{{ r.origin }}">{{ r.origin }}</text>
+        </div>
       </div>
     </scroll>
     <text class="btn-sec" onclick="back">返回</text>
@@ -18,25 +21,54 @@
 <script>
 import router from '@system.router'
 import { getJSON, setJSON } from '../../js/store'
-import { todayRoutineId } from '../../js/session'
+import { HUB_STATE_KEY, readyChoices, todayRoutineId } from '../../js/plan-choices'
 
 export default {
   data: {
     routines: [],
-    todayRid: ''
+    todayRid: '',
+    emptyText: '',
+    navigating: false
   },
   async onShow() {
+    this.navigating = false
+    if (this.mode === 'hub') {
+      const choices = readyChoices(await getJSON(HUB_STATE_KEY, null))
+      this.emptyText = '手表还没有手机动作单。请在手机 openGym 打开训练页，再返回手表首页刷新。'
+      this.routines = choices.map(({ id, session }) => ({
+        id, name: session.name || '未命名动作单', exN: session.entries.length
+      }))
+      const today = choices.find(item => item.today)
+      this.todayRid = today ? today.id : ''
+      return
+    }
     const plan = await getJSON('plan', null)
-    this.routines = (plan && plan.routines ? plan.routines : []).map(r => ({
-      id: r.id, name: r.name, exN: (r.ex || []).length
+    this.routines = (plan && plan.routines ? plan.routines : []).filter(r => r.ex && r.ex.length).map(r => ({
+      id: r.id, name: r.name, exN: r.ex.length, origin: this.mode === 'independent' ? '电脑' : ''
     }))
     this.todayRid = plan ? todayRoutineId(plan) : ''
+    if (this.mode === 'independent') {
+      const choices = readyChoices(await getJSON('phonePlan', null) || await getJSON(HUB_STATE_KEY, null))
+      this.routines = this.routines.concat(choices.map(({ id, session }) => ({
+        id, name: session.name || '未命名动作单', exN: session.entries.length, origin: '手机 · 仅存手表', phonePlan: true
+      })))
+    }
+    this.emptyText = '手表还没有本地动作单。连接电脑或手机后，回首页下载。'
   },
   async pick(i) {
     const r = this.routines[i]
-    if (!r) return
+    if (!r || this.navigating) return
+    this.navigating = true
+    if (this.mode === 'hub') {
+      router.replace({ uri: '/pages/session2', params: { choice: r.id } })
+      return
+    }
+    if (r.phonePlan) {
+      router.replace({ uri: '/pages/session', params: { phonePlanId: r.id } })
+      return
+    }
     await setJSON('startRid', r.id)
-    router.push({ uri: '/pages/session' })
+    router.replace({ uri: '/pages/session', params: { rid: r.id } })
   },
   back() { router.back() }
 }
@@ -52,21 +84,21 @@ export default {
   flex-direction: column;
 }
 .title { font-size: 32px; color: #F5F5F7; font-weight: bold; margin-bottom: 14px; }
-.empty { margin-top: 40px; flex-direction: column; }
+.empty { height: 300px; flex-direction: column; }
 .c-s { font-size: 21px; color: #9A9AA2; }
-.list { height: 300px; }
+.list { height: 340px; flex-direction: column; }
 .item {
   background-color: #101013; border-radius: 18px;
-  padding: 18px 20px; margin-bottom: 12px;
+  min-height: 76px; padding: 12px 20px; margin-bottom: 10px;
   flex-direction: column;
 }
-.today {
-  font-size: 17px; color: #C9F73A; margin-bottom: 4px;
-}
-.name { font-size: 26px; color: #F5F5F7; font-weight: bold; }
-.meta { font-size: 19px; color: #9A9AA2; margin-top: 4px; }
+.item-meta { flex-direction: row; align-items: center; margin-top: 4px; }
+.today { font-size: 17px; color: #C9F73A; margin-right: 12px; }
+.name { font-size: 26px; color: #F5F5F7; font-weight: bold; lines: 2; text-overflow: ellipsis; }
+.meta { font-size: 19px; color: #9A9AA2; }
+.origin { font-size: 17px; color: #B7F35C; margin-left: 9px; }
 .btn-sec {
-  height: 64px; line-height: 64px; text-align: center;
+  height: 58px; line-height: 58px; text-align: center;
   background-color: #19191E; color: #F5F5F7; border-radius: 16px; font-size: 22px;
 }
 </style>

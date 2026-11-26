@@ -34,6 +34,7 @@ public class WatchHubTest {
     static String token = "12345678";
     static String snapshotJson = null;
     static int rev = 0;
+    static String epoch = null;
     static WatchEventQueue queue;
 
     public static void main(String[] args) throws Exception {
@@ -102,6 +103,10 @@ public class WatchHubTest {
         r = req("GET", base + "/watch/snapshot", null, auth);
         check("snapshot served verbatim", r.code == 200
             && r.body.equals("{\"ok\":true,\"rev\":1,\"snapshot\":" + snap + "}"), r);
+        epoch = "phone-process-2";
+        r = req("GET", base + "/watch/snapshot", null, auth);
+        check("snapshot contains phone process epoch", r.body.contains("\"epoch\":\"phone-process-2\"") && r.body.contains("\"snapshot\":" + snap), r);
+        epoch = null;
 
         // events: two well-formed arrive, both acked, queued on the phone
         queue = WatchEventQueue.load(new MemStorage());
@@ -288,6 +293,7 @@ public class WatchHubTest {
                 public String token() { return token; }
                 public String snapshotJson() { return snapshotJson; }
                 public int snapshotRev() { return rev; }
+                public String snapshotEpoch() { return epoch; }
                 public List<String> storeEvents(List<Object> events) { return queue.append(events); }
                 public List<Object> queuedEvents() { return queue.all(); }
             });

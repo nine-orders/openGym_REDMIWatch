@@ -9,6 +9,7 @@ import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.List;
+import java.util.UUID;
 
 import ch.duartesantos.opengym.watchhub.WatchEventQueue;
 import ch.duartesantos.opengym.watchhub.WatchHub;
@@ -35,6 +36,7 @@ public final class WatchHubState {
     // The latest snapshot, exactly as the page sent it, plus the counter the watch
     // reads to skip a re-read. Memory-only by design: a restarted app re-sends on boot.
     private final Object snapLock = new Object();
+    private final String snapshotEpoch = UUID.randomUUID().toString();
     private String snapshotJson;
     private int snapshotRev;
 
@@ -111,6 +113,7 @@ public final class WatchHubState {
         synchronized (snapLock) {
             snapshotJson = json;
             snapshotRev++;
+            android.util.Log.i("WatchHub", "snapshot cached rev=" + snapshotRev + " chars=" + json.length());
         }
     }
 
@@ -134,6 +137,8 @@ public final class WatchHubState {
                     return snapshotRev;
                 }
             }
+
+            public String snapshotEpoch() { return snapshotEpoch; }
 
             public List<String> storeEvents(List<Object> events) {
                 return queue.append(events);

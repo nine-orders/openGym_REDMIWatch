@@ -40,3 +40,12 @@ export async function getJSON(key, def) {
 export function setJSON(key, val) {
   return sSet(key, JSON.stringify(val))
 }
+
+export async function readQueue(key) {
+  const raw = await new Promise((resolve, reject) => {
+    storage.get({ key, default: '[]', success: resolve, fail: reject })
+  })
+  const entries = raw === '' ? [] : JSON.parse(raw)
+  if (!Array.isArray(entries)) throw new Error('无法读取本地同步记录')
+  return entries
+}

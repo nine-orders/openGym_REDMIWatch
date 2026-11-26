@@ -23,8 +23,9 @@ const require = createRequire(PKG_ROOT + '/node_modules/@aiot-toolkit/emulator/p
 const { VvdManager } = require('@aiot-toolkit/emulator')
 const os = require('os')
 
-const RPK = PKG_ROOT + '/dist/ch.duartesantos.opengym.debug.1.0.0.rpk'
-const PKG = 'ch.duartesantos.opengym'
+const manifest = JSON.parse(fs.readFileSync(path.join(APP_ROOT, 'src', 'manifest.json'), 'utf8'))
+const PKG = manifest.package
+const RPK = process.env.EMU_RPK || `${PKG_ROOT}/dist/${PKG}.debug.${manifest.versionName}.rpk`
 
 const logLines = []
 const mgr = new VvdManager({ sdkHome: path.join(os.homedir(), '.vela', 'sdk') })

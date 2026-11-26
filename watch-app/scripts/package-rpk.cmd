@@ -4,7 +4,7 @@ rem Android app's applicationId and signed with the Android debug certificate
 rem (watch-app\sign\debug, converted from YOUR default debug.keystore: jks -> p12 -> pem,
 rem see phone\README.md) -- interconnect pairing needs the two identities to match exactly.
 rem Release signing needs your own release key (never in the repo).
-rem Output: watch-app\dist\ch.duartesantos.opengym.debug.1.0.0.rpk (AstroBox installable).
+rem Output: watch-app\dist\ch.duartesantos.opengym.debug.<manifest version>.rpk.
 rem Prereqs:
 rem   1. env AIOT_PKG = aiot-toolkit packaging project root (node_modules in place)
 rem   2. watch-app\sign\debug\{certificate.pem,private.pem} generated on your machine
@@ -14,6 +14,11 @@ for %%I in ("%~dp0..") do set "APP=%%~fI"
 set "PKG=%AIOT_PKG%"
 if "%PKG%"=="" (
   echo [FAIL] AIOT_PKG not set - point it at your aiot-toolkit packaging project root
+  exit /b 1
+)
+for /f "delims=" %%V in ('node -p "require(process.argv[1]).versionName" "%APP%\src\manifest.json"') do set "VER=%%V"
+if "%VER%"=="" (
+  echo [FAIL] could not read manifest version
   exit /b 1
 )
 
@@ -46,8 +51,8 @@ if not "%R%"=="0" ( echo [FAIL] aiot build exit=%R% & exit /b %R% )
 
 echo [5/5] copy rpk back to watch-app\dist
 if not exist "%APP%\dist" mkdir "%APP%\dist"
-copy /Y "%PKG%\dist\ch.duartesantos.opengym.debug.1.0.0.rpk" "%APP%\dist\" >nul
+copy /Y "%PKG%\dist\ch.duartesantos.opengym.debug.%VER%.rpk" "%APP%\dist\" >nul
 if errorlevel 1 ( echo [FAIL] copy rpk & exit /b 1 )
 
-echo [OK] %APP%\dist\ch.duartesantos.opengym.debug.1.0.0.rpk
+echo [OK] %APP%\dist\ch.duartesantos.opengym.debug.%VER%.rpk
 endlocal

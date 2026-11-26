@@ -19,19 +19,17 @@
 的红米 Watch 5 快应用客户端：手表上记每组（重量×次数）、看下一组练什么、组间休息
 倒计时；热量/心率/时间由手表自带的运动模式统计，两边并行互不干扰。
 
-| 主页 | 记组 | 有氧组 |
+| V4 首页 | 记组 | 有氧组 |
 |---|---|---|
-| ![主页](docs/img/home.png) | ![记组](docs/img/strength.png) | ![有氧组](docs/img/cardio.png) |
+| ![V4 首页模拟器截图](docs/img/home-v4.png) | ![记组](docs/img/strength.png) | ![有氧组](docs/img/cardio.png) |
 
 ```
-红米 Watch 5 (快应用)                  安卓 openGym App (Capacitor)
-  GET  /watch/snapshot ──蓝牙代理──▶  小米运动健康(转发) → 本地HTTP服务(前台服务 :8765)
-  POST /watch/events   ───────────▶  drainWatchEvents() → applyEvents 合入 → pushState
-  POST /watch/ack      ───────────▶  按 id 确认 → 手表删本地待发队列
+红米 Watch 5 (快应用)            安卓 openGym App (Capacitor)
+  GET  /watch/snapshot ─────▶  读取动作单和进行中的训练
+  POST /watch/events   ─────▶  接收训练事件，按 id 回传 acked
 ```
 
-上图是手机中转模式。手表向安卓 App 上报训练事件，手机接收并写入训练历史，再通过
-openGym 同步到电脑。首次打开配对设置时默认显示电脑配对，也可以在顶部切换到手机配对。
+手机自动配对通过小米系统通道，手动配对通过手机 HTTP `:8765`。收到 `acked` 后，手表移除对应的待发事件。手机将训练写入历史，再通过 openGym 同步到电脑。手表的配对设置也支持电脑直连。
 
 ## 组成
 
@@ -47,17 +45,14 @@ openGym 同步到电脑。首次打开配对设置时默认显示电脑配对，
 
 ## 快速开始
 
+**当前手表版本为 1.0.10。** V4 首页可直接进入独立训练或同步手机，动作单超出一屏时可上下滑动。配套安卓 App 使用 1.0.8 手机同步修复版。[下载正式签名 RPK](https://raw.githubusercontent.com/nine-orders/openGym_REDMIWatch/astrobox-release-1.0.10/astrobox/openGym-RedmiWatch5-LTNS-1.0.10.rpk) · [首页实施与验收记录](docs/watch-home-v4-20261126.md) · [手机同步修复记录](docs/phone-sync-fix-20261126.md)
+
 平时只戴手表训练，可以使用[电脑配对与离线训练](watch-app/README.md#电脑配对与离线训练)。
 先在电脑 openGym 配对并拉取动作单，训练后记录存于手表，回到电脑所在网络后自动补传。
 
-两种模式都需要先安装手表快应用：
+下载 RPK 后，可用 AstroBox 安装到红米 Watch 5。已有同签名版本时，可覆盖更新。需要自行构建时，使用 `watch-app/scripts/package-rpk.cmd`。[安装与打包说明](watch-app/README.md)
 
-1. 手表 rpk：`watch-app/scripts/package-rpk.cmd`（详见
-   [watch-app/README.md](watch-app/README.md)「七、打包」）。
-2. 真机安装：用 AstroBox 推送 rpk，见[真机安装说明](watch-app/README.md#二真机安装astrobox免刷机)。
-
-使用手机中转时，按[安卓集成指南](phone/README.md)构建含 hub 的 openGym App，
-再按[手机配对步骤](watch-app/README.md#手机配对与训练)连接。
+使用手机中转时，在手机上打开配套 openGym App，按[手机配对步骤](watch-app/README.md#手机配对与训练)连接。自行构建 APK 可参考[安卓集成指南](phone/README.md)。
 
 ## 兼容性与已知限制
 
@@ -71,6 +66,7 @@ openGym 同步到电脑。首次打开配对设置时默认显示电脑配对，
 
 ## 文档
 
+- [安装包与历史版本](docs/release-archive.md)
 - [产品需求与验收](docs/prd.md)
 - [docs/watch-protocol.md](docs/watch-protocol.md) — 手表↔hub 协议 v2.1（快照/事件/ack 契约）
 - [docs/android-hub.md](docs/android-hub.md) — 安卓 hub 设计与踩坑

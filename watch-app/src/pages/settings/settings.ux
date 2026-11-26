@@ -1,0 +1,96 @@
+<template>
+  <div class="pg">
+    <div class="header">
+      <text class="back" onclick="back">‹ 返回</text>
+      <text class="title">{{ section === 'rest' ? '默认休息' : (section === 'about' ? '关于' : '设置') }}</text>
+    </div>
+    <scroll class="list" if="{{ section === 'menu' }}">
+      <div class="row" onclick="openRest">
+        <text class="label">默认休息时间</text>
+        <text class="value">{{ restLabel }} ›</text>
+      </div>
+      <div class="row" onclick="toggleVibration">
+        <text class="label">休息结束振动</text>
+        <text class="value">{{ vibrate ? '开启' : '关闭' }}</text>
+      </div>
+      <div class="row" onclick="goPair"><text class="label">设备管理</text><text class="value">›</text></div>
+      <div class="row" onclick="goDiagnostics"><text class="label">连接诊断</text><text class="value">›</text></div>
+      <div class="row" onclick="goStorage"><text class="label">本地存储</text><text class="value">›</text></div>
+      <div class="row" onclick="openAbout"><text class="label">关于</text><text class="value">›</text></div>
+    </scroll>
+    <scroll class="list" if="{{ section === 'rest' }}">
+      <text class="detail">独立训练使用默认时间。动作有指定时间时优先采用。</text>
+      <div class="row" for="{{ (i, item) in options }}" onclick="chooseRest(i)">
+        <text class="label">{{ item.label }}</text>
+        <text class="value" if="{{ restLabel === item.label }}">✓</text>
+      </div>
+    </scroll>
+    <div class="about" if="{{ section === 'about' }}">
+      <image class="icon" src="/brand-icon.png"></image>
+      <text class="title">openGym 开炼</text>
+      <text class="detail">手表端 v1.0.10</text>
+      <text class="detail">源自 DuarteSantos8/openGym</text>
+      <text class="detail">AGPL-3.0 开源许可</text>
+    </div>
+    <text class="error" if="{{ message }}">{{ message }}</text>
+  </div>
+</template>
+
+<script>
+import router from '@system.router'
+import { getPreferences, REST_OPTIONS, savePreferences } from '../../js/preferences'
+
+const restLabel = seconds => seconds === null ? '跟随动作单' : seconds === 0 ? '不休息' : seconds + ' 秒'
+
+export default {
+  data: { section: 'menu', restSec: null, restLabel: '', vibrate: true, message: '', busy: false, options: [] },
+  async onShow() {
+    const prefs = await getPreferences()
+    this.restSec = prefs.restSec
+    this.restLabel = restLabel(prefs.restSec)
+    this.vibrate = prefs.vibrate
+    this.options = REST_OPTIONS.map(seconds => ({ label: restLabel(seconds) }))
+  },
+  openRest() { this.section = 'rest' },
+  openAbout() { this.section = 'about' },
+  toggleVibration() { return this.update(this.restSec, !this.vibrate) },
+  async chooseRest(i) {
+    if (i >= 0 && i < REST_OPTIONS.length && await this.update(REST_OPTIONS[i], this.vibrate)) this.section = 'menu'
+  },
+  async update(seconds, vibrate) {
+    if (this.busy) return false
+    this.busy = true
+    this.message = ''
+    try {
+      await savePreferences({ restSec: seconds, vibrate })
+      this.restSec = seconds
+      this.restLabel = restLabel(seconds)
+      this.vibrate = vibrate
+      return true
+    } catch (e) { this.message = e.message; return false }
+    finally { this.busy = false }
+  },
+  goPair() { router.push({ uri: '/pages/pair' }) },
+  goDiagnostics() { router.push({ uri: '/pages/spike' }) },
+  goStorage() { router.push({ uri: '/pages/pending', params: { storageView: '1' } }) },
+  back() {
+    if (this.section === 'menu') router.back()
+    else { this.section = 'menu'; this.message = '' }
+  }
+}
+</script>
+
+<style>
+.pg { position: absolute; width: 432px; height: 514px; padding: 18px 22px; background-color: #000000; flex-direction: column; }
+.header { height: 59px; align-items: center; margin-bottom: 9px; }
+.back { width: 100px; height: 51px; line-height: 51px; color: #B7F35C; font-size: 20px; }
+.title { color: #F5F7F2; font-size: 29px; font-weight: bold; }
+.list { height: 382px; flex-direction: column; }
+.row { height: 55px; padding: 0 15px; margin-bottom: 8px; background-color: #151A13; border-radius: 15px; align-items: center; justify-content: space-between; }
+.label { color: #F0F4EB; font-size: 23px; }
+.value { color: #B7F35C; font-size: 19px; }
+.detail { color: #B8C3AB; font-size: 20px; lines: 2; margin: 8px 0; }
+.about { flex-direction: column; align-items: center; }
+.icon { width: 76px; height: 76px; margin: 21px 0 12px; }
+.error { color: #FFBF63; font-size: 19px; }
+</style>

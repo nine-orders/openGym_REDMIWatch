@@ -1,0 +1,86 @@
+<template>
+  <div class="pg">
+    <div class="header">
+      <text class="back" onclick="back">‹ 返回</text>
+      <text class="title">{{ storageView === '1' ? '本地存储' : '待同步记录' }}</text>
+    </div>
+    <text class="summary">{{ summary }}</text>
+    <scroll class="list">
+      <text class="note" if="{{ storageView === '1' }}">手机待发事件 {{ eventCount }}/{{ eventLimit }}。电脑整场记录容量取决于手表剩余空间。</text>
+      <text class="note" if="{{ ungrouped }}">另有 {{ ungrouped }} 条无法识别场次的旧记录。</text>
+      <text class="note" if="{{ received && rows.length }}">手机已接收的记录，请在手机训练历史确认。</text>
+      <div class="row" for="{{ (i, item) in rows }}">
+        <text class="name">{{ item.name }}</text>
+        <text class="meta">{{ item.date }} · {{ item.groupText }}</text>
+        <text class="status">{{ item.status }}</text>
+      </div>
+      <text class="note" if="{{ notice }}">{{ notice }}</text>
+    </scroll>
+    <text class="button" onclick="syncNow">{{ busy ? '正在同步…' : '立即同步 / 重试' }}</text>
+  </div>
+</template>
+
+<script>
+import router from '@system.router'
+import { readDevice } from '../../js/connections'
+import { QUEUE_MAX } from '../../js/hub'
+import { canSendPending, pendingText, readPending, refreshConnection, sendPending } from '../../js/home-sync'
+
+export default {
+  data: { summary: '正在读取…', rows: [], eventCount: 0, eventLimit: QUEUE_MAX, ungrouped: 0, received: false, notice: '', busy: false },
+  onShow() { return this.update() },
+  async update(phase, total) {
+    const info = await readPending().catch(() => null)
+    this.summary = pendingText(info, phase, total)
+    if (info) {
+      this.eventCount = info.phoneEvents
+      this.ungrouped = info.ungrouped
+      this.received = info.received
+      this.rows = info.rows.map(item => ({ ...item,
+        groupText: item.groups != null ? item.groups + ' 组已记录' : item.pendingGroups ? item.pendingGroups + ' 组待手机接收' : '组数未知' }))
+    }
+    return info
+  },
+  async syncNow() {
+    if (this.busy) return
+    this.busy = true
+    this.notice = ''
+    let info
+    try {
+      info = await this.update()
+      if (!info || (!info.count && !info.ungrouped)) return
+      const device = await readDevice()
+      if (!device.connection) { this.notice = '请先在设备管理连接原设备。'; return }
+      const { live } = await refreshConnection(device)
+      const wid = live && live.active && live.active.id
+      if (!canSendPending(info, device, wid)) { this.notice = '当前连接没有可发送的记录。请查看各场状态。'; return }
+      await this.update('sending', info.count)
+      await sendPending(device, () => this.update('sending', info.count), wid)
+      const remaining = await this.update()
+      if (remaining && canSendPending(remaining, device, wid)) {
+        this.notice = '未确认的训练仍保存在手表。'
+        await this.update('failed')
+      }
+    } catch (e) {
+      this.notice = '未确认的训练仍保存在手表。'
+      await this.update('failed')
+    } finally { this.busy = false }
+  },
+  back() { if (!this.busy) router.back() }
+}
+</script>
+
+<style>
+.pg { position: absolute; width: 432px; height: 514px; padding: 18px 22px; background-color: #000000; flex-direction: column; }
+.header { height: 57px; align-items: center; }
+.back { width: 100px; height: 51px; line-height: 51px; color: #B7F35C; font-size: 20px; }
+.title { color: #F5F7F2; font-size: 29px; font-weight: bold; }
+.summary { color: #FFCA81; font-size: 22px; height: 51px; line-height: 51px; lines: 1; text-overflow: ellipsis; }
+.list { height: 295px; flex-direction: column; }
+.note { color: #B8C3AB; font-size: 20px; line-height: 28px; margin-bottom: 8px; }
+.row { flex-direction: column; background-color: #151A13; border-radius: 16px; padding: 10px 14px; margin-bottom: 8px; }
+.name { font-size: 23px; font-weight: bold; color: #F0F4EB; lines: 1; text-overflow: ellipsis; }
+.meta { font-size: 18px; color: #B8C3AB; margin-top: 2px; }
+.status { font-size: 19px; color: #FFCA81; margin-top: 4px; }
+.button { height: 61px; line-height: 61px; margin-top: 9px; text-align: center; border-radius: 17px; background-color: #B7F35C; color: #152508; font-size: 22px; font-weight: bold; }
+</style>

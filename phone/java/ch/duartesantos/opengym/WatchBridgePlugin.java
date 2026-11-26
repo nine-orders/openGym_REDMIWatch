@@ -58,6 +58,10 @@ public class WatchBridgePlugin extends Plugin {
         ret.put("paired", true);
         Boolean installed = ic.wearAppInstalled();
         ret.put("installed", installed == null ? true : installed.booleanValue());
+        // Android snapshots are cached for both HTTP and system transports; the
+        // SDK's install query must never gate publication to the HTTP hub.
+        ret.put("snapshotCache", true);
+        ret.put("systemReady", ic.isListening());
         ret.put("reachable", WatchHubService.isRunning());
         call.resolve(ret);
     }
@@ -134,5 +138,10 @@ public class WatchBridgePlugin extends Plugin {
         JSObject data = new JSObject();
         data.put("queued", WatchHubState.get().queue().size());
         p.notifyListeners("watchEvent", data);
+    }
+
+    static void notifyWatchState() {
+        WatchBridgePlugin p = instance;
+        if (p != null) p.notifyListeners("watchState", new JSObject());
     }
 }

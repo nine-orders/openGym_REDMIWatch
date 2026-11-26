@@ -7,11 +7,18 @@
       <text class="btn-sec" onclick="goHome">返回主页</text>
     </div>
 
+    <div class="col wait-card" if="{{ ready && phase === 'waiting' }}">
+      <text class="sum-title">同步手机</text>
+      <text class="wait-status">{{ phoneNotice }}</text>
+      <text class="btn-main" onclick="retryPhone">立即刷新</text>
+      <text class="btn-sec" onclick="goHome">返回首页</text>
+    </div>
+
     <!-- ============ 训练界面 ============ -->
     <div class="col" if="{{ ready && !err && phase === 'train' }}">
       <div class="top">
         <text class="prog">{{ prog }}</text>
-        <text class="clock">{{ elapsed }}</text>
+        <text class="clock">{{ phoneNotice || elapsed }}</text>
       </div>
       <text class="exname">{{ curName }}</text>
       <!-- 圆点逐个可点（找回被跳过的组）；右侧标签：热身 / 超级组（对齐 Apple Watch 版 tags） -->
@@ -28,12 +35,11 @@
       <div class="col" if="{{ !curCardio }}">
         <text class="lab">重量 {{ unit }}</text>
         <div class="steprow">
-          <text class="step" onclick="wStep(-25)">-2.5</text>
-          <text class="step" onclick="wStep(-5)">-.5</text>
-          <text class="bigv" if="{{ dispW > 0 }}">{{ dispW }}</text>
-          <text class="bigv" if="{{ dispW <= 0 }}">自重</text>
-          <text class="step" onclick="wStep(5)">+.5</text>
-          <text class="step" onclick="wStep(25)">+2.5</text>
+          <text class="step weight-step" onclick="wStep(-25)">-2.5</text>
+          <text class="step weight-step" onclick="wStep(-5)">-.5</text>
+          <text class="weight-value">{{ dispW > 0 ? dispW : '自重' }}</text>
+          <text class="step weight-step" onclick="wStep(5)">+.5</text>
+          <text class="step weight-step" onclick="wStep(25)">+2.5</text>
         </div>
         <text class="lab">{{ modeSec ? '秒数' : '次数' }}</text>
         <div class="steprow">
@@ -57,6 +63,7 @@
         <text class="btn3" onclick="skipTap">{{ skipConfirm ? '确认跳过?' : '跳过这组' }}</text>
         <text class="btn3" onclick="nextEx">下一动作</text>
       </div>
+      <text class="warn" if="{{ actionError }}">{{ actionError }}</text>
       <text class="link-end" onclick="endTap">结束训练</text>
     </div>
 
@@ -86,8 +93,8 @@
       <scroll class="sum-list">
         <text class="sum-line" for="{{ (i, ln) in sumList }}">{{ ln }}</text>
       </scroll>
-      <text class="btn-main" if="{{ saveState !== 1 }}" onclick="saveTap">{{ busy ? '同步中…' : (saveState === 2 ? '重试同步' : '结束并同步') }}</text>
-      <text class="ok" if="{{ saveState === 1 }}">已发到手机 ✓</text>
+      <text class="btn-main" if="{{ saveState !== 1 }}" onclick="saveTap">{{ busy ? '同步中…' : (saveState === 2 ? '重试同步' : (endedOnPhone ? '同步手表记录' : '结束并同步')) }}</text>
+      <text class="ok" if="{{ saveState === 1 }}">{{ endedOnPhone ? '手机已结束训练，请查看历史' : '手机已接收，历史请在手机确认' }}</text>
       <text class="warn" if="{{ saveState === 2 }}">未送达：{{ syncMsg }}（稍后自动补投）</text>
       <div class="row2">
         <text class="btn-sec" onclick="goHome">返回</text>
@@ -125,8 +132,11 @@
 // 与 v1 页面（pages/session，直连 PC 整档 PUT）并存：v1 保留为 fallback（S6 决定，
 // 见 docs/watch-v2/s6-ui-integration.md）。
 import router from '@system.router'
-import { buzz } from '../../js/store'
-import { syncSnapshot, loadState, saveState, recordSet, begin, end, abandon, flush, emitEvent, phoneSupports, uid, expireIfStale } from '../../js/hub'
+import { buzz, getJSON, readQueue, setJSON } from '../../js/store'
+import { syncSnapshot, loadState, saveState, saveTracking, recordSet, begin, end, abandon, flush, emitEvent, phoneSupports, protoPing, uid, expireIfStale } from '../../js/hub'
+import { connectionOwner, readDevice } from '../../js/connections'
+import { getPreferences } from '../../js/preferences'
+import { readyChoices } from '../../js/plan-choices'
 import { setIndex, next, progress, summary, skip, isSkipped, sideUp, restAdjustEvent, restSkipEvent } from '../../js/session-core'
 
 const pad = n => (n < 10 ? '0' + n : '' + n)
@@ -177,30 +187,49 @@ export default {
     saveState: 0,
     syncMsg: '',
     confirmQuit: false,
-    lastRestEventAt: 0
+    lastRestEventAt: 0,
+    phoneNotice: '',
+    actionError: '',
+    vibrateAtRestEnd: true,
+    endedOnPhone: false
   },
 
   async onInit() {
+    this.vibrateAtRestEnd = (await getPreferences()).vibrate
+    if (this.follow === '1') {
+      this.phase = 'waiting'
+      this.phoneNotice = '正在检查训练状态…'
+      const device = await readDevice()
+      this._phone = device.mode === 'hub' ? device.connection : null
+      this.ready = true
+      await this.pollFollow(true)
+      if (this._phone) protoPing(this._phone).catch(() => {})
+      return
+    }
     // S10 会话过期（docs/watch-v2/s10）：隔夜/久置的本地会话在进入本页时自动离场——
     // finish 事件补投给手机落库，wid 进 tombstone 不被旧快照复活。正在用的会话（页面
     // 开着）不会触发，训练中轮询不查。
     await expireIfStale()
-    let st = null
+    let s = null
+    let syncError = null
     try {
-      st = await syncSnapshot()
+      const st = await syncSnapshot()
+      s = st.state
     } catch (e) {
-      // 断网：本地已有进行中的会话就接着记（重启恢复语义），否则给出可读错误
-      const local = await loadState()
-      if (local && local.workout) { this.adopt(local); this.ready = true; return }
-      this.err = '连不上手机：' + e.message
-      this.ready = true
-      return
+      syncError = e
     }
-    let s = st.state
     if (!s) s = await loadState()
     this.state = s
     if (s && s.workout) {
       this.adopt(s)
+    } else if (this.resume === '1') {
+      this.err = '没有进行中的训练。请回首页选择动作单。'
+    } else if (this.choice) {
+      const selected = readyChoices(s).find(item => item.id === this.choice)
+      if (selected) this.adopt(await begin(selected.session))
+      else this.err = '这套动作单已更新或不可用。请回首页重新选择。'
+    } else if (syncError) {
+      this.err = '连不上手机：' + syncError.message
     } else if (s && s.ready && s.ready.today) {
       this.adopt(await begin(s.ready.today))
     } else if (s && s.ready && s.ready.others && s.ready.others.length) {
@@ -214,12 +243,14 @@ export default {
 
   onShow() {
     if (this.timer) return
+    this._hidden = false
     this.timer = setInterval(() => this.tick(), 1000)
     this.pollLoop()
   },
   onHide() { this.stopAll() },
   onDestroy() { this.stopAll() },
   stopAll() {
+    this._hidden = true
     if (this.timer) { clearInterval(this.timer); this.timer = null }
     if (this.pollT) { clearTimeout(this.pollT); this.pollT = null }
   },
@@ -234,6 +265,7 @@ export default {
     }, this.pollMs)
   },
   async pollOnce() {
+    if (this.follow === '1') return this.pollFollow(false)
     try {
       const r = await syncSnapshot()
       this.pollMs = 10000
@@ -242,6 +274,54 @@ export default {
     } catch (e) {
       this.pollMs = Math.min(60000, this.pollMs * 2)
     }
+  },
+  retryPhone() { return this.pollFollow(false) },
+  async pollFollow(allowCached) {
+    if (this._checking || this.busy) return
+    if (!this._phone) { this.phoneNotice = '请返回首页连接手机'; return }
+    this._checking = true
+    try {
+      const r = await syncSnapshot(this._phone)
+      if (this._hidden || r.stale) return
+      this.pollMs = 10000
+      const active = r.snapshot && r.snapshot.active
+      const liveWid = active && active.id
+      if (!r.snapshot) {
+        this.phoneNotice = this.wid ? '等待手机更新' : '等待手机更新训练状态'
+        if (allowCached) await this.restoreFollow()
+      } else if (!this.wid) {
+        if (liveWid && r.state && r.state.workout && r.state.workout.id === liveWid) {
+          this.phoneNotice = ''
+          this.adopt(r.state)
+          this.reconcile(r.state)
+          await setJSON('joinedPhone', { owner: connectionOwner(this._phone), wid: liveWid })
+        } else {
+          this.phoneNotice = liveWid ? '等待手机确认本次训练' : '等待手机开始训练'
+        }
+      } else if (liveWid !== this.wid) {
+        this.phoneNotice = ''
+        if (this.phase !== 'summary' || !this.endedOnPhone) this.enterSummary(this.lastW, true)
+      } else if (r.state && r.state.workout && r.state.workout.id === this.wid) {
+        this.phoneNotice = ''
+        if (!this.busy) this.reconcile(r.state)
+      }
+      flush(this._phone, null, true, liveWid).catch(() => {})
+    } catch (e) {
+      if (this._hidden) return
+      this.pollMs = Math.min(60000, this.pollMs * 2)
+      this.phoneNotice = this.wid ? '手机离线' : '手机同步异常，请重试'
+      if (allowCached) await this.restoreFollow()
+    } finally { this._checking = false }
+  },
+  async restoreFollow() {
+    const joined = await getJSON('joinedPhone', null)
+    const s = await loadState(this._phone)
+    if (!this._hidden && joined && s && s.workout && s.workout.id === joined.wid &&
+        joined.owner === connectionOwner(this._phone)) this.adopt(s)
+  },
+  persistTracking(s) {
+    if (this.follow === '1') return saveTracking(s, this._phone)
+    return saveState(s)
   },
 
   // ---------- 快照盖上来之后的对账 ----------
@@ -270,9 +350,10 @@ export default {
     const pr = w.rest
     if (!this.busy && pr && pr.endsAt > Date.now()) {
       const fresh = !this.lastRestEventAt || (pr.at != null && pr.at >= this.lastRestEventAt)
+      if (fresh && this.follow === '1') this.lastRestEventAt = 0
       if (fresh && this.phase === 'rest') {
-        if (pr.endsAt > this.restEndAt) {
-          this.restTotal = Math.max(this.restTotal, Math.ceil((pr.endsAt - Date.now()) / 1000))
+        if (this.follow === '1' || pr.endsAt > this.restEndAt) {
+          this.restTotal = pr.total || Math.max(this.restTotal, Math.ceil((pr.endsAt - Date.now()) / 1000))
           this.restEndAt = pr.endsAt
           this.tickRest()
         }
@@ -287,7 +368,11 @@ export default {
         this.phase = 'rest'
         this.tickRest()
       }
+    } else if (this.follow === '1' && this.phase === 'rest' && !this.busy &&
+        !this.lastRestEventAt && this._phoneRest) {
+      this.phase = 'train'
     }
+    if (this.follow === '1') this._phoneRest = !!(pr && pr.endsAt > Date.now())
     this.refresh()
   },
 
@@ -400,7 +485,7 @@ export default {
     this.restTxt = pad(Math.floor(sec / 60)) + ':' + pad(sec % 60)
     this.restBar = Math.round(100 * (1 - left / (this.restTotal * 1000)))
     if (left <= 0) {
-      buzz('long')
+      if (this.vibrateAtRestEnd) buzz('long')
       this.skipConfirm = false
       this.phase = 'train'
       this.refresh()
@@ -449,10 +534,7 @@ export default {
     if (this._lastTick && Date.now() - this._lastTick < 700) return
     this._lastTick = Date.now()
     this.busy = true
-    this.state = await recordSet(this.exI, this.setI, this.collectVals(en))
-    this.busy = false
-    buzz('short')
-    this.advance()
+    return this.saveSet(this.collectVals(en))
   },
   // 单侧组的一侧（S6：L/R 双按钮，用户可任选先练哪侧；完成的那侧按钮置灰打勾）
   async sideTap(side) {
@@ -468,10 +550,17 @@ export default {
     const o = this.collectVals(en)
     o.side = side
     this.busy = true
-    this.state = await recordSet(this.exI, this.setI, o)
-    this.busy = false
-    buzz('short')
-    this.advance()
+    return this.saveSet(o)
+  },
+  async saveSet(values) {
+    this.actionError = ''
+    try {
+      if (this.follow === '1') values.wid = this.wid
+      this.state = await recordSet(this.exI, this.setI, values, this._phone)
+      buzz('short')
+      this.advance()
+    } catch (e) { this.actionError = e.message || '记组失败，请重试' }
+    finally { this.busy = false }
   },
   advance() {
     const s = this.state
@@ -483,9 +572,9 @@ export default {
     const si = setIndex(s, n.entry)
     this.setI = si != null ? si : 0
     s.entryIndex = n.entry
-    saveState(s)
+    this.persistTracking(s)
     const en = s.workout.entries[this.exI]
-    const rs = en.restSec != null ? en.restSec : (s.restSec || 90)   // 动作自己的 restSec 为 0 就不休息
+    const rs = en.restSec != null ? en.restSec : (s.workout.restSec == null ? (s.restSec || 90) : s.workout.restSec)
     if (n.rest && rs > 0) {
       this.restTotal = rs
       this.restEndAt = Date.now() + rs * 1000
@@ -516,7 +605,7 @@ export default {
   skipCurrent() {
     const s = this.state
     const w = s && s.workout
-    if (!w || this.phase !== 'train') return
+    if (!w || this.phase !== 'train' || this.busy) return
     const en = w.entries[this.exI]
     const row = en.sets[this.setI]
     if (row && row.done) return
@@ -525,7 +614,7 @@ export default {
     const si = setIndex(this.state, this.exI)
     if (si != null) {
       this.setI = si
-      saveState(this.state)
+      this.persistTracking(this.state)
       this.refresh()
       return
     }
@@ -539,15 +628,15 @@ export default {
       if (p) to = p[0]
     }
     if (to >= w.entries.length) {
-      saveState(this.state)
+      this.persistTracking(this.state)
       this.enterSummary(this.state.workout, false)
       return
     }
     this.exI = to
     const si2 = setIndex(this.state, to)
     this.setI = si2 != null ? si2 : 0
-    s.entryIndex = to
-    saveState(this.state)
+    this.state.entryIndex = to
+    this.persistTracking(this.state)
     this.phase = 'train'
     this.refresh()
   },
@@ -556,7 +645,7 @@ export default {
   dotTap(j) {
     const s = this.state
     const w = s && s.workout
-    if (!w || this.phase !== 'train') return
+    if (!w || this.phase !== 'train' || this.busy) return
     const en = w.entries[this.exI]
     const row = en && en.sets[j]
     if (!row || row.done) return
@@ -568,14 +657,14 @@ export default {
   // ---------- 动作切换 / 休息控制 ----------
   navEx(d) {
     const s = this.state
-    if (!s || !s.workout) return
+    if (!s || !s.workout || this.busy) return
     this.skipConfirm = false
     const last = s.workout.entries.length - 1
     this.exI = Math.min(last, Math.max(0, this.exI + d))
     const si = setIndex(s, this.exI)
     this.setI = si != null ? si : 0
     s.entryIndex = this.exI
-    saveState(s)
+    this.persistTracking(s)
     this.phase = 'train'
     this.refresh()
   },
@@ -601,11 +690,13 @@ export default {
     if (!ev) return
     this.lastRestEventAt = ev.at
     if (!phoneSupports(2)) return
-    emitEvent(ev).catch(() => { })
+    emitEvent(ev, this._phone, this.follow === '1' ? this.lastW : null).then(ok => {
+      if (!ok && this.follow === '1') this.actionError = '休息调整未发送'
+    }).catch(() => { if (this.follow === '1') this.actionError = '休息调整未发送' })
   },
 
   // ---------- 结束 / 同步 ----------
-  endTap() { this.enterSummary(this.state && this.state.workout, false) },
+  endTap() { if (!this.busy) this.enterSummary(this.state && this.state.workout, false) },
   // w：要总结的训练。手机端结束时本地 workout 已被快照清掉，用 reconcile 传进来的最后
   // 一眼训练（lastW）出总结；本端主动结束时它还在 state 里。
   enterSummary(w, endedOnPhone) {
@@ -632,17 +723,25 @@ export default {
       })
       .filter(x => x != null)
     this.phase = 'summary'
+    this.endedOnPhone = endedOnPhone === true
     this.saveState = 0
     this.syncMsg = ''
     this.confirmQuit = false
-    saveState(s)
+    if (this.follow !== '1') saveState(s)
   },
   async saveTap() {
     if (this.busy) return
     this.busy = true
     try {
-      await end()            // finish 事件入队（重复调用无事件，只剩补投）
-      const ok = await flush()
+      let ok
+      if (this.follow === '1') {
+        if (!this.endedOnPhone) await end(this.wid, this._phone)
+        await flush(this._phone, null, true, this.wid)
+        ok = !(await readQueue('hubQueue')).some(e => e && e.wid === this.wid)
+      } else {
+        await end()
+        ok = await flush()
+      }
       this.saveState = ok ? 1 : 2
       this.syncMsg = ok ? '' : '手机连不上'
       if (ok) buzz('long')
@@ -655,8 +754,10 @@ export default {
   // 本端放弃跟踪（「停止跟记」）：已经记出去的组手机照收，手机端训练继续，
   // 由用户回手机上结束；本端只清场并记住 wid（旧快照不许把它复活），不发 finish 事件。
   async quitTap() {
+    if (this.busy) return
     if (this.confirmQuit) {
-      await abandon()
+      if (this.follow === '1') await setJSON('joinedPhone', null)
+      else await abandon()
       this.goHome()
       return
     }
@@ -672,6 +773,8 @@ export default {
     this.adopt(await begin(o))
   },
   goHome() {
+    if (this.busy) return
+    if (this.follow === '1') { router.back(); return }
     try { router.replace({ uri: '/pages/index' }) } catch (e) { router.back() }
   }
 }
@@ -689,6 +792,8 @@ export default {
 }
 .col { flex-direction: column; }
 .loading { font-size: 24px; color: #9A9AA2; margin-top: 200px; }
+.wait-card { padding-top: 39px; }
+.wait-status { color: #B7F35C; font-size: 25px; margin: 22px 0; }
 .err { font-size: 24px; color: #f85149; margin-top: 150px; margin-bottom: 30px; }
 
 .top { flex-direction: row; justify-content: space-between; }
@@ -730,6 +835,10 @@ export default {
 }
 .wide { width: 100px; }
 .bigv { font-size: 48px; color: #ffffff; font-weight: bold; }
+.weight-step { width: 60px; }
+.weight-value {
+  width: 120px; font-size: 36px; color: #ffffff; font-weight: bold; text-align: center;
+}
 .cardiohint { font-size: 22px; color: #9A9AA2; text-align: center; margin: 20px 0 20px 0; }
 
 .btn-main {

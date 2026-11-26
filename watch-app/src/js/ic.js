@@ -8,6 +8,7 @@ import IC from '@system.interconnect'
 
 // hubHost 的标记值：免输入系统配对（不是真实地址，HTTP 链路永远不解析它）
 export const IC_HOST = 'interconnect'
+export const IC_UNAVAILABLE = -1
 
 const TIMEOUT = (typeof globalThis !== 'undefined' && globalThis.__icTimeout !== undefined)
   ? globalThis.__icTimeout   // 测试口：加快无应答用例（真机恒为 10000）
@@ -24,12 +25,29 @@ function makeId() {
 
 function ensure() {
   if (conn) return conn
-  conn = IC.instance()
-  conn.onmessage = res => deliver(res)
-  conn.onopen = () => { /* 状态由 diagnosis/getReadyState 读，这里无需动作 */ }
-  conn.onclose = () => failAll('系统通道已断开')
-  conn.onerror = res => failAll('系统通道错误 ' + ((res && res.code) != null ? res.code : ''))
+  let channel
+  // The older working build handled Vela's default-export wrapper on device.
+  const candidates = IC && IC.default && IC.default !== IC ? [IC, IC.default] : [IC]
+  for (const mod of candidates) {
+    if (!mod || typeof mod.instance !== 'function') continue
+    try { channel = mod.instance() } catch (e) {
+      if (isUnavailableMethod(e)) continue
+      throw e
+    }
+    if (channel && typeof channel.send === 'function') break
+    channel = null
+  }
+  if (!channel) return null
+  channel.onmessage = res => deliver(res)
+  channel.onopen = () => { /* 状态由 diagnosis/getReadyState 读，这里无需动作 */ }
+  channel.onclose = () => { lastStatus = null; failAll('系统通道已断开', 1006) }
+  channel.onerror = res => { lastStatus = null; failAll('系统通道错误', res && res.code) }
+  conn = channel
   return conn
+}
+
+function isUnavailableMethod(e) {
+  return !!(e && /not a function/i.test(String(e.message || '')))
 }
 
 // 对端应答：{ id, status, body }。id 对不上就丢（不相干消息）。
@@ -46,17 +64,29 @@ function deliver(res) {
   pending.delete(msg.id)
   clearTimeout(p.timer)
   const code = typeof msg.status === 'number' ? msg.status : 200
+  let body = msg.body
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body) } catch (e) { body = null }
+  }
   if (code >= 200 && code < 300) {
-    p.resolve({ code: code, body: msg.body })
+    if (!body || typeof body !== 'object') {
+      p.reject(icError('系统通道响应不是有效 JSON', 502))
+    } else p.resolve(body)
   } else {
-    const err = new Error((msg.body && msg.body.error) ? msg.body.error : ('HTTP ' + code))
+    const err = new Error((body && body.error) ? body.error : ('HTTP ' + code))
     err.code = code
     p.reject(err)
   }
 }
 
-function failAll(reason) {
+function icError(reason, code) {
   const err = new Error(reason)
+  if (typeof code === 'number') err.code = code
+  return err
+}
+
+function failAll(reason, code) {
+  const err = icError(reason, code)
   for (const [, p] of pending) { clearTimeout(p.timer); p.reject(err) }
   pending.clear()
 }
@@ -65,16 +95,63 @@ function failAll(reason) {
 //   0=OK 链接成功 / 204=CONNECT_TIMEOUT / 1001=APP_UNINSTALLED 对端未安装 / 1000=OTHERS
 export function probeIc() {
   return new Promise((resolve, reject) => {
+    let finished = false
+    const timer = setTimeout(() => done(204), TIMEOUT)
+    function done(status) {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      lastStatus = { status, at: Date.now() }
+      resolve(lastStatus)
+    }
+    function fail(error) {
+      if (finished) return
+      finished = true
+      lastStatus = null
+      clearTimeout(timer)
+      reject(error)
+    }
     try {
-      ensure().diagnosis({
-        timeout: TIMEOUT,
-        success: data => {
-          lastStatus = { status: typeof data.status === 'number' ? data.status : 1000, at: Date.now() }
-          resolve(lastStatus)
-        },
-        fail: (data, code) => reject(new Error('系统通道诊断失败 ' + code))
-      })
-    } catch (e) { reject(e) }
+      const c = ensure()
+      if (!c) { done(IC_UNAVAILABLE); return }
+      if (typeof c.diagnosis === 'function') {
+        try {
+          c.diagnosis({
+            timeout: TIMEOUT,
+            success: data => done(data && typeof data.status === 'number' ? data.status : 1000),
+            fail: (data, code) => fail(icError('系统通道诊断失败', code))
+          })
+          return
+        } catch (e) {
+          if (finished || !isUnavailableMethod(e)) throw e
+        }
+      }
+      // Restore the older firmware fallback chain. A ready status only
+      // indicates a candidate link; the page still requires the hub ping.
+      function readApkState(fallback) {
+        if (finished) return
+        if (typeof c.getApkStatus !== 'function') { done(fallback); return }
+        try { done(c.getApkStatus() === 1 ? 0 : 1006) } catch (e) {
+          if (isUnavailableMethod(e)) done(fallback)
+          else fail(e)
+        }
+      }
+      if (typeof c.getReadyState === 'function') {
+        try {
+          c.getReadyState({
+            success: data => done(data && data.status === 1 ? 0 : 1006),
+            fail: (data, code) => {
+              if (code === 1001 || code === 1006) done(code)
+              else readApkState(typeof code === 'number' && code !== 0 ? code : 1000)
+            }
+          })
+          return
+        } catch (e) {
+          if (!isUnavailableMethod(e)) throw e
+        }
+      }
+      readApkState(IC_UNAVAILABLE)
+    } catch (e) { fail(e) }
   })
 }
 
@@ -88,13 +165,13 @@ export function icUp() {
 // 任何失败都 throw，由 hubCall 决定回退；超时按 TIMEOUT。
 export function icCall(method, path, body) {
   const c = ensure()
-  if (typeof c.send !== 'function') throw new Error('系统通道不可用')
+  if (!c) throw new Error('系统通道不可用')
   const id = makeId()
   reqSeq += 1
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id)
-      reject(new Error('系统通道应答超时'))
+      reject(icError('系统通道应答超时', 204))
     }, TIMEOUT)
     pending.set(id, { resolve, reject, timer })
     try {
@@ -104,7 +181,7 @@ export function icCall(method, path, body) {
         fail: (data, code) => {
           clearTimeout(timer)
           pending.delete(id)
-          reject(new Error('系统通道发送失败 ' + code))
+          reject(icError('系统通道发送失败 ' + code, code))
         }
       })
     } catch (e) {
@@ -112,11 +189,5 @@ export function icCall(method, path, body) {
       pending.delete(id)
       reject(e)
     }
-  }).then(res => {
-    let b = res.body
-    if (typeof b === 'string') {
-      try { b = JSON.parse(b) } catch (e) { b = null }
-    }
-    return b
   })
 }

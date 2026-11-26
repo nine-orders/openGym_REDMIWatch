@@ -92,6 +92,7 @@ public class WatchHubService extends Service {
 
     @Override
     public void onDestroy() {
+        WatchInterconnect.get().stop();
         running = false;
         try {
             if (serverSocket != null) serverSocket.close();
@@ -135,6 +136,7 @@ public class WatchHubService extends Service {
             out.write(WatchHttp.headBytes(res));
             out.write(res.body);
             out.flush();
+            android.util.Log.i("WatchHub", req.method + " " + req.pathOnly() + " status=" + res.status + " bytes=" + res.body.length);
             if (res.status != 200) {
                 android.util.Log.w("WatchHub", res.status + " for " + req.method + " " + req.path
                     + " <- " + s.getRemoteSocketAddress());

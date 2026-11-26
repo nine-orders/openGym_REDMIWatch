@@ -30,6 +30,9 @@ public final class WatchHub {
         /** Bumped once per stored snapshot; lets the watch skip a re-read of the same one. */
         int snapshotRev();
 
+        /** Stable for the phone process; optional for old implementations. */
+        default String snapshotEpoch() { return null; }
+
         /** Stores events (append-if-new by id); returns the acked ids. */
         List<String> storeEvents(List<Object> events);
 
@@ -74,8 +77,10 @@ public final class WatchHub {
         if ("/watch/snapshot".equals(path)) {
             if (!get) return err(405, "method_not_allowed");
             String snap = env.snapshotJson();
+            String epoch = env.snapshotEpoch();
             // Embedded verbatim: what the page built is what the watch parses, byte for byte.
             String body = "{\"ok\":true,\"rev\":" + env.snapshotRev()
+                + (epoch == null ? "" : ",\"epoch\":" + WatchJson.write(epoch))
                 + ",\"snapshot\":" + (snap == null ? "null" : snap) + "}";
             return WatchHttp.json(200, body);
         }

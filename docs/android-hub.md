@@ -4,6 +4,8 @@
 插件 + 前台服务 HTTP server + API 契约冻结。完成标准：APK 可构建安装；curl 拿到合法
 快照；POST 一条 setDone 事件后训练界面看到该组完成。
 
+2026-11-26 的本地 1.0.7 修复扩展了快照协议。`GET /watch/snapshot` 可返回可选字段 `epoch`，标识手机进程。手表在相同 `epoch` 内按 `rev` 判断新旧，在手机重启后可以接受新 `epoch` 下较低的 `rev`。旧手机省略此字段时沿用原有比较逻辑。系统通道、正式成品及最新验证结果见[手机同步修复记录](phone-sync-fix-20261126.md)。
+
 ## 结论先行
 
 - **架构落锤实现**：`WatchBridge` 安卓插件（方法集与 iOS 逐一对应）+ `WatchHubService`

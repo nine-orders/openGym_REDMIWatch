@@ -527,12 +527,13 @@ export async function startWatchSync ({ useStore, useUI }) {
     }
     return ready
   }
-  // Whether a watch with the app is there: asked at start and when the app comes back, not on every
-  // change. Without one nothing below runs at all: no snapshot, no clips, no bridge call per tick.
+  // iOS needs a paired watch with its app installed. Android's hub caches snapshots
+  // locally for HTTP as well as IC, so it must publish even before the wearable SDK
+  // discovers the watch (or if its install check temporarily returns false).
   let linked = false
   const checkLink = async () => {
     const was = linked
-    try { const st = await p.WatchBridge.status(); linked = !!(st && st.paired && st.installed) } catch { linked = false }
+    try { const st = await p.WatchBridge.status(); linked = !!(st && (st.snapshotCache === true || (st.paired && st.installed))) } catch { linked = false }
     // A watch that is new here (the app just installed on it, or reinstalled): it has nothing yet,
     // so the snapshot goes again even when it is the same as the last one sent.
     if (linked && !was) lastSent = null

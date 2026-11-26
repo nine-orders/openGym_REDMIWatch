@@ -10,7 +10,14 @@ import { fileURLToPath } from 'node:url'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SRC = path.resolve(HERE, '..', 'src')
 const MANIFEST = JSON.parse(fs.readFileSync(path.join(SRC, 'manifest.json'), 'utf8'))
-const PAGES = [['pages/index', 'index'], ['pages/pair', 'pair'], ['pages/pick', 'pick'], ['pages/session', 'session'], ['pages/session2', 'session2'], ['pages/spike', 'spike']]
+const PAGES = Object.entries(MANIFEST.router.pages).map(([key, page]) => [key, page.component])
+
+test('动作单列表显式开启 Vela 纵向滚动', () => {
+  const raw = fs.readFileSync(path.join(SRC, 'pages', 'pick', 'pick.ux'), 'utf8')
+  const viewport = raw.match(/<scroll\b[^>]*>/)
+  assert.ok(viewport)
+  assert.match(viewport[0], /\bscroll-y="true"/)
+})
 
 for (const [key, file] of PAGES) {
   test('页面 ' + key + '：脚本可加载、事件绑定与跳转目标都有落点', async () => {
@@ -22,10 +29,12 @@ for (const [key, file] of PAGES) {
     // 从 .gen/<p>/ 出发要再上两级才能到 src/js/。
     const genDir = path.join(HERE, '.gen', key)
     fs.mkdirSync(genDir, { recursive: true })
-    const genFile = path.join(genDir, file + '.mjs')
+    // Lifecycle tests generate executable modules too; give the static suite a
+    // separate filename so concurrent node test processes cannot truncate them.
+    const genFile = path.join(genDir, file + '.static.mjs')
     fs.writeFileSync(genFile, sm[1].replace(/\.\.\/\.\.\/js\//g, '../../../../src/js/'))
 
-    const mod = await import('./.gen/' + key + '/' + file + '.mjs')
+    const mod = await import('./.gen/' + key + '/' + file + '.static.mjs')
     const comp = mod.default
     assert.ok(comp && typeof comp === 'object')
 

@@ -1,178 +1,182 @@
 <template>
   <div class="pg">
     <div class="head">
-      <text class="title">开炼</text>
-      <text class="sub">openGym 训练伴侣</text>
+      <div class="brand">
+        <image class="app-icon" src="/brand-icon.png"></image>
+        <div class="wordmark">
+          <text class="brand-en">openGym</text>
+          <text class="brand-zh">开炼</text>
+        </div>
+      </div>
+      <text class="settings" onclick="goSettings">设置</text>
     </div>
 
-    <div class="card" if="{{ !hasSetup }}">
-      <text class="c-t">尚未配对</text>
-      <text class="c-s">在电脑上的 openGym 生成配对码，或连接手机 openGym App。</text>
-      <text class="btn-main" onclick="goPair">开始配对</text>
+    <div class="device" onclick="goPair">
+      <div class="device-info">
+        <div class="{{ connectionClass }}"></div>
+        <text class="device-label">{{ deviceLabel }}</text>
+      </div>
+      <text class="switch">切换 ›</text>
     </div>
 
-    <div class="card" if="{{ hasSetup }}">
-      <text class="row-l" onclick="goPair">连接方式（点按切换）</text>
-      <text class="row-v">{{ hubMode ? '手机 hub' : '直连服务器' }}</text>
-      <text class="row-l">{{ hubMode ? '手机' : '服务器' }}</text>
-      <text class="row-v">{{ host }}</text>
-      <text class="row-l">待同步</text>
-      <text class="row-v">{{ pendingN }} {{ hubMode ? '条事件' : '条训练' }}</text>
-      <text class="row-l">动作单</text>
-      <text class="row-v">{{ todayName }}</text>
+    <div class="independent" onclick="startTap">
+      <div class="card-copy">
+        <text class="primary-title">独立训练</text>
+        <text class="primary-sub">{{ independentActive ? '继续本次训练' : '选择动作单' }}</text>
+      </div>
+      <text class="primary-arrow">›</text>
     </div>
 
-    <text class="btn-main" if="{{ hasSetup }}" onclick="startTap">{{ active && !hubMode ? '继续训练' : '开始训练' }}</text>
-    <div class="row2" if="{{ hasSetup }}">
-      <text class="btn-sec" if="{{ !hubMode }}" onclick="goPick">选动作单</text>
-      <text class="btn-sec" onclick="goPair">配对设置</text>
+    <div class="phone" onclick="phoneTap">
+      <div class="card-copy">
+        <text class="phone-title">同步手机</text>
+        <text class="phone-sub">{{ phoneLabel }}</text>
+      </div>
+      <text class="phone-arrow">›</text>
     </div>
-    <text class="sync" if="{{ syncMsg }}">{{ syncMsg }}</text>
-    <text class="hint">训练时配合手表自带的运动模式使用：先开运动模式记录心率与热量，再用开炼记组。</text>
+
+    <div class="pending" onclick="goPending">
+      <div class="{{ pendingClass }}"></div>
+      <text class="pending-label">{{ pendingLabel }}</text>
+      <text class="pending-arrow">›</text>
+    </div>
   </div>
 </template>
 
 <script>
 import router from '@system.router'
-import { sGet, getJSON, setJSON } from '../../js/store'
-import { flushPending, todayRoutineId, buildPlanCache } from '../../js/session'
-import { getData } from '../../js/api'
-import { syncSnapshot, loadState, flush } from '../../js/hub'
+import { readDevice } from '../../js/connections'
+import { getJSON } from '../../js/store'
+import { canSendPending, connectionFailure, pendingText, readPending, refreshConnection, sendPending } from '../../js/home-sync'
 
 export default {
   data: {
-    host: '',
-    hasSetup: false,
-    hubMode: false,
-    active: null,
-    pendingN: 0,
-    todayName: '未设置',
-    syncMsg: ''
+    independentActive: false,
+    deviceLabel: '正在读取连接…',
+    connectionClass: 'dot dot-idle',
+    phoneLabel: '需要连接手机',
+    pendingLabel: '正在读取同步记录…',
+    pendingClass: 'dot dot-idle'
   },
   async onShow() {
-    // 模式解析（与 pair 页一致）：pairMode 显式选择优先（S7 hub 开关持久化），否则按
-    // 既有凭证自动判定（hub 凭证齐 → hub；否则走 v1 直连）；凭证与所选模式不匹配时
-    // hasSetup=false → 未配对卡片。
-    const pm = await sGet('pairMode', '')
-    const hh = await sGet('hubHost', '')
-    const ht = await sGet('hubToken', '')
-    const h = await sGet('host', '')
-    const t = await sGet('token', '')
-    this.hubMode = pm === 'hub' ? true : (pm === 'direct' ? false : !!(hh && ht))
-    this.host = this.hubMode ? (hh === 'interconnect' ? '自动配对（系统通道）' : hh) : h
-    const token = this.hubMode ? ht : t
-    this.hasSetup = !!(this.host && token)
-    this.active = await getJSON('active', null)
-    // hub 模式（v2）：今日动作单与待发事件来自快照状态；打开应用顺手拉一次快照并补投
-    if (this.hubMode) {
-      this.pendingN = (await getJSON('hubQueue', [])).length
-      try { await syncSnapshot() } catch (e) { /* 断网沿用本地快照状态 */ }
-      flush().catch(() => { })
-      const st = await loadState()
-      const r = st && st.ready
-      this.todayName = r && r.today && r.today.name ? r.today.name : '手机端没有今日安排'
-      this.pendingN = (await getJSON('hubQueue', [])).length
+    this.stopRefresh()
+    const view = this._view = {}
+    const [device, active] = await Promise.all([readDevice(), getJSON('active', null)])
+    if (this._view !== view) return
+    this.independentActive = !!active
+    this.setConnection(device, device.connection ? 'connecting' : 'unpaired')
+    const pending = await this.updatePending(view)
+    if (this._view !== view || !device.connection) return
+    this._refresh = this.refresh(view, device, pending)
+    return this._refresh
+  },
+  onHide() { this.stopRefresh() },
+  onDestroy() { this.stopRefresh() },
+  stopRefresh() {
+    this._view = null
+    if (this._poll != null) { clearTimeout(this._poll); this._poll = null }
+  },
+  setConnection(device, status, live) {
+    const phone = device.mode === 'hub'
+    const name = phone ? '手机' : '电脑'
+    this.deviceLabel = {
+      unpaired: device.mode === 'offline' ? '离线模式' : '未配对',
+      connecting: '正在连接' + name,
+      online: name + '已连接',
+      offline: name + '离线 · 已保存连接',
+      error: name + '通信异常'
+    }[status]
+    this.connectionClass = status === 'online' ? 'dot dot-live' : status === 'error' ? 'dot dot-warn' : 'dot dot-idle'
+    if (!phone || !device.connection) {
+      this.phoneLabel = device.connection ? '切换至手机连接' : '需要连接手机'
+    } else if (status === 'online') {
+      this.phoneLabel = !live ? '等待手机更新状态' : live.active ? '手机训练中' : '等待手机开始训练'
+    } else {
+      this.phoneLabel = status === 'connecting' ? '正在检查训练状态' : '同步异常 · 点击重试'
+    }
+  },
+  async updatePending(view, phase, total) {
+    const info = await readPending().catch(() => null)
+    if (this._view === view) {
+      this.pendingLabel = pendingText(info, phase, total)
+      this.pendingClass = !info || info.count || info.ungrouped || phase === 'failed' ? 'dot dot-warn' : 'dot dot-live'
+    }
+    return info
+  },
+  async refresh(view, device, initial) {
+    let delay = 20000
+    let live
+    try {
+      const result = await refreshConnection(device)
+      if (this._view !== view) return
+      live = result.live
+      this.setConnection(device, 'online', live)
+      if (device.mode === 'hub') delay = 10000
+    } catch (error) {
+      if (this._view !== view) return
+      this.setConnection(device, connectionFailure(error))
+      const info = initial || await this.updatePending(view)
+      if (info && canSendPending(info, device, null)) await this.updatePending(view, 'failed')
+      if (this._view === view) this._poll = setTimeout(() => this.refresh(view, device), delay)
       return
     }
-    const q = await getJSON('pending', [])
-    this.pendingN = q.length
-    const plan = await getJSON('plan', null)
-    if (plan && plan.routines) {
-      const rid = todayRoutineId(plan)
-      const r = plan.routines.find(x => x.id === rid)
-      this.todayName = r ? r.name : '点「选动作单」挑选'
+    const info = initial || await this.updatePending(view)
+    const liveWid = live && live.active && live.active.id
+    if (this._view === view && info && canSendPending(info, device, liveWid)) {
+      await this.updatePending(view, 'sending', info.count)
+      let failed = false
+      try {
+        await sendPending(device, () => this.updatePending(view, 'sending', info.count), liveWid)
+      } catch (e) { failed = true }
+      const pending = await readPending().catch(() => null)
+      failed = failed || !!(pending && canSendPending(pending, device, liveWid))
+      await this.updatePending(view, failed ? 'failed' : '')
     }
-    // 已配对时后台静默刷新计划缓存：网页端补录的训练、改的动作单、新重量，下次打开
-    // 应用就生效（兼修「沿用上次重量」过期）；失败沿用旧缓存。只更新 plan，不动进行中的
-    // active。有积压先补投再刷新，让 GET 能带上刚补投的训练。
-    if (this.hasSetup) {
-      const done = () => {
-        this._refresh = getData()
-          .then(async res => {
-            const fresh = buildPlanCache((res && res.state) || {})
-            if (!fresh.routines.length) return // 空档案不覆盖本地
-            await setJSON('plan', fresh)
-            const rid = todayRoutineId(fresh)
-            const r = fresh.routines.find(x => x.id === rid)
-            this.todayName = r ? r.name : '点「选动作单」挑选'
-          })
-          .catch(() => { })
-      }
-      if (q.length) {
-        flushPending()
-          .then(async () => {
-            this.pendingN = 0
-            this.syncMsg = '待同步训练已全部补投 ✓'
-          })
-          .catch(async () => {
-            this.pendingN = (await getJSON('pending', [])).length
-          })
-          .then(done)
-      } else {
-        done()
-      }
-    }
+    if (this._view === view) this._poll = setTimeout(() => this.refresh(view, device), delay)
   },
   async startTap() {
-    // hub 模式：进 v2 会话页（快照驱动；没有进行中的会话时自动开今日/让用户挑就绪会话）
-    if (this.hubMode) {
-      router.push({ uri: '/pages/session2' })
-      return
-    }
-    const plan = await getJSON('plan', null)
-    if (!plan || !plan.routines || !plan.routines.length) {
-      this.syncMsg = '本地无计划：请先在网页端添加动作单，再回手表重新配对拉取'
-      return
-    }
-    if (!this.active) {
-      // 每次开局都按今天的计划现算目标（dayPlan > 队列 > 周计划），经路由参数传给
-      // session 页；持久化的 startRid 只代表"选动作单页里手动挑的那个"，不覆盖今日计划。
-      // rest 日没有目标 → 落到选动作单页。
-      const target = todayRoutineId(plan)
-      if (!target || !plan.routines.some(x => x.id === target)) { this.goPick(); return }
-      router.push({ uri: '/pages/session', params: { rid: target } })
-      return
-    }
-    router.push({ uri: '/pages/session' })
+    const active = await getJSON('active', null)
+    if (active) router.push({ uri: '/pages/session' })
+    else router.push({ uri: '/pages/pick', params: { mode: 'independent' } })
   },
-  goPick() { router.push({ uri: '/pages/pick' }) },
-  goPair() { router.push({ uri: '/pages/pair' }) }
+  async phoneTap() {
+    const device = await readDevice()
+    if (device.mode === 'hub' && device.connection) router.push({ uri: '/pages/session2', params: { follow: '1' } })
+    else router.push({ uri: '/pages/pair', params: { focus: 'hub' } })
+  },
+  goPair() { router.push({ uri: '/pages/pair' }) },
+  goSettings() { router.push({ uri: '/pages/settings' }) },
+  goPending() { router.push({ uri: '/pages/pending' }) }
 }
 </script>
 
 <style>
-/* 曜黑极简 OLED Mono 换肤（2026-11）：纯黑底 + 单一酸性绿强调。
- * token：底 #000000 · 容器 #101013 · 次级钮 #19191E · 强调 #C9F73A · 强调上墨色 #0A0A0A
- *        主文字 #F5F5F7 · 次级 #9A9AA2 · 弱化 #62626A · 成功 #35D07F。
- * Vela 引擎 div 默认主轴是 row，纵向排列必须显式声明（手机快应用默认 column）。
- * S7 紧凑化：新增「连接方式（点按切换）」行后仍须整体收进 432×514（页面高度是硬约束）。 */
-.pg {
-  position: absolute; width: 432px; height: 514px;
-  background-color: #000000; padding: 20px 24px;
-  flex-direction: column;
-}
-.head { margin-bottom: 10px; flex-direction: column; }
-.title { font-size: 38px; color: #F5F5F7; font-weight: bold; }
-.sub { font-size: 17px; color: #9A9AA2; margin-top: 2px; }
-.card {
-  background-color: #101013; border-radius: 20px;
-  padding: 14px; margin-bottom: 12px;
-  flex-direction: column;
-}
-.c-t { font-size: 24px; color: #F5F5F7; font-weight: bold; }
-.c-s { font-size: 17px; color: #9A9AA2; margin-top: 6px; }
-.row-l { font-size: 16px; color: #9A9AA2; margin-top: 6px; }
-.row-v { font-size: 21px; color: #F5F5F7; }
-.btn-main {
-  height: 74px; line-height: 74px; text-align: center;
-  background-color: #C9F73A; color: #0A0A0A; border-radius: 22px;
-  font-size: 26px; font-weight: bold; margin-bottom: 8px;
-}
-.row2 { flex-direction: row; justify-content: space-between; }
-.btn-sec {
-  width: 186px; height: 60px; line-height: 60px; text-align: center;
-  background-color: #19191E; color: #F5F5F7; border-radius: 18px; font-size: 21px;
-}
-.sync { font-size: 17px; color: #35D07F; margin-top: 4px; }
-.hint { font-size: 15px; color: #62626A; margin-top: 8px; }
+.pg { position: absolute; width: 432px; height: 514px; padding: 20px 24px; background-color: #000000; flex-direction: column; }
+.head { height: 77px; align-items: center; justify-content: space-between; margin-bottom: 9px; }
+.brand { align-items: center; }
+.app-icon { width: 49px; height: 49px; border-radius: 12px; margin-right: 11px; }
+.wordmark { flex-direction: column; }
+.brand-en { color: #F5F7F2; font-size: 29px; font-weight: bold; }
+.brand-zh { color: #A8B098; font-size: 17px; }
+.settings { width: 76px; height: 55px; line-height: 55px; background-color: #181D15; border-radius: 17px; color: #F0F4EB; text-align: center; font-size: 20px; }
+.device { height: 58px; padding: 0 16px; margin-bottom: 12px; border-radius: 17px; background-color: #141912; align-items: center; justify-content: space-between; }
+.device-info { align-items: center; }
+.dot { width: 9px; height: 9px; border-radius: 5px; margin-right: 10px; }
+.dot-idle { background-color: #87917D; }
+.dot-live { background-color: #B7F35C; }
+.dot-warn { background-color: #FFBF63; }
+.device-label { color: #D9E7C6; font-size: 20px; }
+.switch { color: #B7F35C; font-size: 19px; }
+.independent { height: 125px; padding: 0 22px; margin-bottom: 12px; border-radius: 25px; background-color: #B7F35C; align-items: center; justify-content: space-between; }
+.card-copy { flex-direction: column; }
+.primary-title { color: #152508; font-size: 35px; font-weight: bold; }
+.primary-sub { color: #344A1F; font-size: 22px; margin-top: 4px; }
+.primary-arrow { color: #263D12; font-size: 45px; }
+.phone { height: 103px; padding: 0 22px; margin-bottom: 9px; border-radius: 22px; background-color: #213819; align-items: center; justify-content: space-between; }
+.phone-title { color: #F2F7EB; font-size: 29px; font-weight: bold; }
+.phone-sub { color: #B7F35C; font-size: 20px; margin-top: 4px; }
+.phone-arrow { color: #B7F35C; font-size: 38px; }
+.pending { height: 61px; padding: 0 13px; align-items: center; }
+.pending-label { flex: 1; color: #FFCA81; font-size: 19px; lines: 1; text-overflow: ellipsis; }
+.pending-arrow { color: #FFCA81; font-size: 26px; }
 </style>

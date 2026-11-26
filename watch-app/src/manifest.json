@@ -1,8 +1,8 @@
 {
   "package": "ch.duartesantos.opengym",
   "name": "开炼",
-  "versionName": "1.0.0",
-  "versionCode": 1,
+  "versionName": "1.0.10",
+  "versionCode": 11,
   "minPlatformVersion": 1000,
   "icon": "/icon.png",
   "deviceTypeList": ["watch"],
@@ -19,6 +19,8 @@
       "pages/index": { "component": "index" },
       "pages/pair": { "component": "pair" },
       "pages/pick": { "component": "pick" },
+      "pages/settings": { "component": "settings" },
+      "pages/pending": { "component": "pending" },
       "pages/session": { "component": "session" },
       "pages/session2": { "component": "session2" },
       "pages/spike": { "component": "spike" }

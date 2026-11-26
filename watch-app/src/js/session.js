@@ -5,16 +5,14 @@
 // 有字段级保护（只会追加、不会删掉它没见过的字段），所以这种只追加的提交是安全的。
 import NAMES from './names.js'
 import { getData, putData, activity } from './api'
-import { getJSON, setJSON } from './store'
+import { getJSON, readQueue, setJSON } from './store'
+import { connectionOwner, readConnection, readDevice } from './connections'
+import { todayISO } from './plan-choices'
+
+export { todayISO, todayRoutineId } from './plan-choices'
 
 export const round2 = n => Math.round((Number(n) || 0) * 100) / 100
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-
-export function todayISO() {
-  const d = new Date()
-  const p = n => (n < 10 ? '0' + n : '' + n)
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
-}
 
 export const nameOf = id => (NAMES && NAMES[id]) || (typeof id === 'string' && id ? id : '?')
 
@@ -101,30 +99,6 @@ export function buildPlanCache(state) {
   return out
 }
 
-// 今天该练哪个动作单。优先级对齐服务端 effectiveRoutineIds（前端 lib/history.js:477）：
-// dayPlan 覆盖 > 教练队列 > 周计划。队列的语义是「第一个未完成的会话」（queueRemaining[0]），
-// 完成判定按 DONE RULE 在 buildPlanCache 构建时算好（queueDoneIds），推送成功后就地追加；
-// 轮换还没开始（startsOn 在未来）时队列不接管，与 queueNext 只应答一天的语义一致。
-// week[wd] 在前端是 string[]（一天可排多个），这里容忍标量与数组两种形态；dayPlan/队列里
-// 指向不存在动作单的悬空 id 按服务端语义跳过、落到下一层，而不是开局报错。
-export function todayRoutineId(plan) {
-  const t = todayISO()
-  const dp = plan.dayPlan || {}
-  const wk = plan.week || {}
-  const dow = '' + new Date().getDay()
-  const has = id => id && (plan.routines || []).some(r => r.id === id)
-  if (dp[t] === 'rest') return ''
-  if (has(dp[t])) return dp[t]
-  const q = (plan.queue && Array.isArray(plan.queue.ids)) ? plan.queue.ids : []
-  const startsOn = (plan.queue && plan.queue.startsOn) || ''
-  if (q.length && (!startsOn || t >= startsOn)) {
-    const done = Array.isArray(plan.queueDoneIds) ? plan.queueDoneIds : []
-    const remaining = q.filter(id => has(id) && !done.includes(id))
-    if (remaining.length) return remaining[0]
-  }
-  return [].concat(wk[dow] || []).filter(has)[0] || ''
-}
-
 // 从计划缓存构建一次训练会话（沿用上次模式）
 export function buildSession(plan, routineId) {
   const r = plan.routines.find(x => x.id === routineId) || plan.routines[0]
@@ -158,6 +132,18 @@ export function buildSession(plan, routineId) {
   }
 }
 
+export function buildCachedPhoneSession(cache, ready) {
+  return {
+    id: uid(), name: ready.name || '手机动作单', unit: cache.unit || 'kg', start: Date.now(),
+    restSec: cache.restSec == null ? 90 : cache.restSec, source: 'phone-plan', owner: null,
+    entries: ready.entries.filter(e => Array.isArray(e.sets) && e.sets.length).map(e => ({
+      id: e.id, name: e.name || nameOf(e.id), mode: e.mode === 'time' ? 'sec' : 'reps', rs: e.restSec,
+      sets: e.sets.map(row => ({ w: row.w || 0, r: e.mode === 'time' ? (row.sec || 0) : (row.r || 0),
+        done: false, ts: 0 }))
+    }))
+  }
+}
+
 export function totals(s) {
   let done = 0, total = 0, vol = 0
   s.entries.forEach(en => {
@@ -185,11 +171,13 @@ export function toWorkout(s) {
   })
   return {
     id: s.id,
-    d: todayISO(),
+    d: todayISO(new Date(s.start)),
     start: s.start,
     end: Date.now(),
     routineId: s.routineId,
     name: s.name,
+    ...(s.owner !== undefined ? { owner: s.owner } : {}),
+    ...(s.source ? { source: s.source } : {}),
     vol: t.vol,
     entries: entries,
     _ts: Date.now()
@@ -215,9 +203,9 @@ function prsOf(w, workouts) {
 }
 
 // 提交：GET 整档 → 追加 → 带 baseRev PUT，409 冲突则带新文档重试（最多 3 轮）
-export async function pushWorkout(w) {
+export async function pushWorkout(w, connection) {
   for (let i = 0; i < 3; i++) {
-    const res = await getData()
+    const res = await getData(connection)
     let state = res && res.state
     if (!state || typeof state !== 'object') {
       throw new Error('档案为空：请先在网页端登录 openGym 并让它完成一次同步')
@@ -232,7 +220,8 @@ export async function pushWorkout(w) {
     state.workouts.push(w)
     state._ts = Date.now()
     try {
-      await putData({ state: state, baseRev: res.rev })
+      const ack = await putData({ state: state, baseRev: res.rev }, connection)
+      if (!ack || ack.ok !== true) throw new Error('电脑未确认保存')
       return true
     } catch (e) {
       if (e.code === 409) continue
@@ -244,11 +233,12 @@ export async function pushWorkout(w) {
 
 // 推送成功后把该会话就地记入本地队列完成列表（离线补投同样适用）。网页端或其它端
 // 记的训练不经过这里——由打开应用时的静默刷新拉全量重算兜底。
-export async function markQueueDone(routineId) {
+export async function markQueueDone(routineId, connection) {
   if (!routineId) return
   const plan = await getJSON('plan', null)
   const ids = plan && plan.queue && plan.queue.ids
-  if (!Array.isArray(ids) || !ids.includes(routineId)) return
+  if (!Array.isArray(ids) || !ids.includes(routineId) ||
+      (connection && plan.owner !== undefined && plan.owner !== connectionOwner(connection))) return
   const done = Array.isArray(plan.queueDoneIds) ? plan.queueDoneIds : []
   if (!done.includes(routineId)) {
     plan.queueDoneIds = done.concat([routineId])
@@ -256,35 +246,88 @@ export async function markQueueDone(routineId) {
   }
 }
 
-// 优先即时同步；失败则进待发队列，下次打开应用或网络恢复时补投
-export async function queueOrPush(w) {
+let pendingWrites = Promise.resolve()
+let pendingFlushes = Promise.resolve()
+
+function withPending(fn) {
+  const task = pendingWrites.then(async () => fn(await readQueue('pending')))
+  pendingWrites = task.catch(() => {})
+  return task
+}
+
+async function writePending(q) {
+  if (!await setJSON('pending', q)) throw new Error('手表存储写入失败，请保留当前训练后重试')
+}
+
+export function bindPendingComputer(owner) {
+  return withPending(async q => {
+    if (q.some(w => w && w.owner === undefined)) {
+      await writePending(q.map(w => w && w.owner === undefined ? { ...w, owner } : w))
+    }
+    const active = await getJSON('active', null)
+    if (active && active.owner === undefined && !await setJSON('active', { ...active, owner })) {
+      throw new Error('手表存储写入失败，请稍后重试')
+    }
+  })
+}
+
+export const computerCanSend = (w, connection) => !!connection &&
+  (w.owner === undefined || (w.owner != null && w.owner === connectionOwner(connection)))
+
+// The persisted entry is the source of truth, including after a lost reply or app exit.
+export async function queueOrPush(w, connection, send = true, onSaved) {
+  if (connection === undefined) connection = await readConnection('direct')
+  const { owner = connectionOwner(connection), ...workout } = w
+  await withPending(q => {
+    if (!q.some(x => x && x.id === w.id)) return writePending(q.concat([{ ...workout, owner }]))
+  })
+  if (onSaved) await onSaved()
+  if (!send || !computerCanSend({ owner }, connection)) {
+    return { synced: false, error: !owner ? '已保存在手表' : '等待原电脑连接' }
+  }
   try {
-    await pushWorkout(w)
-    await markQueueDone(w.routineId)
-    return { synced: true }
+    await flushPending(connection)
+    return { synced: !(await readQueue('pending')).some(x => x && x.id === w.id) }
   } catch (e) {
-    const q = await getJSON('pending', [])
-    if (!q.some(x => x && x.id === w.id)) q.push(w)
-    await setJSON('pending', q)
-    return { synced: false, error: e.message }
+    const synced = !(await readQueue('pending')).some(x => x && x.id === w.id)
+    return { synced, error: synced ? '' : e.message }
   }
 }
 
-export async function flushPending() {
-  const q = await getJSON('pending', [])
-  while (q.length) {
-    await pushWorkout(q[0])
-    await markQueueDone(q[0].routineId)
-    q.shift()
-    await setJSON('pending', q)
-  }
-  return true
+export function flushPending(connection, onProgress, selectedOnly = false) {
+  const task = pendingFlushes.then(async () => {
+    const target = connection === undefined ? await readConnection('direct') : connection
+    const q = await readQueue('pending')
+    for (const w of q) {
+      if (!w || !computerCanSend(w, target)) continue
+      if (selectedOnly) {
+        const device = await readDevice()
+        if (device.mode !== 'direct' || connectionOwner(device.connection) !== connectionOwner(target)) break
+      }
+      const { owner, ...workout } = w
+      await pushWorkout(workout, target)
+      await withPending(current => writePending(current.filter(x => x && x.id !== w.id)))
+      await markQueueDone(w.routineId, target)
+      if (onProgress) await onProgress()
+    }
+    return !(await readQueue('pending')).length
+  })
+  pendingFlushes = task.catch(() => {})
+  return task
 }
 
-// 训练中实时心跳：电脑端 openGym 管理面板可看到"正在训练"（70 秒无心跳自动消失）。
-// 返回 promise 供测试/调用方等待，页面侧照旧发射后不管。
-export function heartbeat(s, done, total, exIdx) {
-  if (!s) return Promise.resolve()
+async function activeComputer(s) {
+  const device = await readDevice()
+  if (device.mode === 'direct' && computerCanSend(s, device.connection)) return device.connection
+  // Existing session callers without credentials can keep using the PC HTTP path.
+  if (device.mode === 'direct' && !device.connection && s.owner === undefined) return readConnection('direct')
+  return null
+}
+
+export async function heartbeat(s, done, total, exIdx) {
+  if (!s) return
+  const connection = await activeComputer(s)
+  if (!connection) return
   return activity({
     active: true,
     name: s.name,
@@ -293,7 +336,10 @@ export function heartbeat(s, done, total, exIdx) {
     setsDone: done,
     setsTotal: total,
     startedAt: s.start
-  }).catch(() => { })
+  }, connection).catch(() => { })
 }
 
-export const heartbeatEnd = () => activity({ active: false, reason: 'closed' }).catch(() => { })
+export async function heartbeatEnd(s) {
+  const connection = s ? await activeComputer(s) : await readConnection('direct')
+  if (connection) return activity({ active: false, reason: 'closed' }, connection).catch(() => { })
+}
