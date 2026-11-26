@@ -1,0 +1,29 @@
+{
+  "item": {
+    "id": "ch.duartesantos.opengym",
+    "restype": "quick_app",
+    "name": "开炼",
+    "description": "开炼是用于记录 openGym 力量训练的红米 Watch 5 快应用，由 Vibe Coding（AI 辅助编程）开发。\n电脑配对后，可在手表离线选择动作单，记录重量、次数和组间休息，重连后把训练补传到原电脑。搭配集成 Watch Hub 的安卓 openGym 1.0.8，也可主动加入手机正在进行的训练。\n1.0.10 提供 V4 首页，并修复动作单列表上下滑动。",
+    "preview": [
+      "docs/img/home-v4.png",
+      "astrobox/training.png"
+    ],
+    "icon": "watch-app/src/brand-icon.png",
+    "cover": "astrobox/cover.png"
+  },
+  "links": [
+    {
+      "icon": "github-logo",
+      "title": "开源代码与使用说明",
+      "url": "https://github.com/nine-orders/openGym_REDMIWatch"
+    }
+  ],
+  "downloads": {
+    "xmrw5": {
+      "version": "1.0.10",
+      "file_name": "astrobox/openGym-RedmiWatch5-LTNS-1.0.10.rpk",
+      "versionCode": 11
+    }
+  },
+  "ext": {}
+}
